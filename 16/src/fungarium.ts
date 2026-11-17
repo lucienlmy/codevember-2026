@@ -29,6 +29,22 @@ export const SPECIES: Species[] = [
     kind: 'agaric', sv: 'Röd flugsvamp', en: 'Fly agaric', latin: 'Amanita muscaria', seed: 4, scale: 1.0,
     note: 'In mossy birch and spruce forest, late summer into autumn. It comes up as a white egg; the red cap breaks through the veil, which stays on it as white warts, and leaves a skirt hanging on the stem. Poisonous.',
   },
+  {
+    kind: 'porcini', sv: 'Karljohan', en: 'Porcini', latin: 'Boletus edulis', seed: 8, scale: 1.0,
+    note: 'Under spruce and birch, late summer into autumn: the king of the forest floor. A thick brown bun of a cap on a fat, club-shaped stem with a fine white net at the top; no gills but a sponge of pores underneath, white when young, olive yellow later.',
+  },
+  {
+    kind: 'slippery', sv: 'Smörsopp', en: 'Slippery jack', latin: 'Suillus luteus', seed: 6, scale: 1.0,
+    note: 'Under pine, in groups, late summer into autumn. A chestnut cap with a low hump, coated in slime that shines when wet; bright yellow pores; a pale yellow stem dotted brown above a ring, the torn skin that covered the pores when it was young.',
+  },
+  {
+    kind: 'morel', sv: 'Toppmurkla', en: 'Black morel', latin: 'Morchella elata', seed: 9, scale: 1.0,
+    note: 'In spring, on burnt ground, bark and the disturbed edges of conifer forest. A tall cone of honeycomb: olive brown pits between dark ridges that run up its length, set straight on a pale, hollow, granular stem with a little groove where they meet.',
+  },
+  {
+    kind: 'waxcap', sv: 'Sotvaxskivling', en: 'Sooty waxcap', latin: 'Hygrophorus camarophyllus', seed: 4, scale: 1.0,
+    note: 'Under spruce, in moss, late in autumn. A sooty grey-brown cap streaked with dark fibres, opening flat around a broad hump; thick, far-apart, waxy white gills running down a white stem. Greasy to the touch when wet.',
+  },
 ];
 
 export class Fungarium {
@@ -63,7 +79,7 @@ export class Fungarium {
     this.el.innerHTML = `
       <div class="sheet"><div class="page">
         <button class="close" type="button" aria-label="Close">×</button>
-        <header><b>Fungarium</b><i>What your spores can grow. Tap one to throw it; the corner mark watches it grow.<span class="keys"> Keys: <kbd>1</kbd>–<kbd>5</kbd> take one, <kbd>←</kbd> <kbd>→</kbd> turn the pages.</span></i></header>
+        <header><b>Fungarium</b><i>What your spores can grow. Tap one to throw it; the corner mark watches it grow.<span class="keys"> Keys: <kbd>1</kbd>–<kbd>9</kbd> take one, <kbd>←</kbd> <kbd>→</kbd> turn the pages.</span></i></header>
         <div class="grid"></div>
         <div class="detail" hidden>
           <button class="back" type="button">← All</button>
