@@ -11,7 +11,7 @@ import { shellVertex, shellFragment, mossLighting } from './shaders';
 import { World, groundHeight, mossAt, type WorldHooks } from './world';
 import { Props } from './props';
 import { Ferns } from './ferns';
-import { Trees } from './trees';
+import { Trees, trunkFoot, trunkRadius, type Trunk } from './trees';
 import { makeDewMaterial } from './dew';
 import { makeAtmosPass, makeLensPass } from './post';
 import { Fungi, type FungusKind } from './fungi';
@@ -280,11 +280,15 @@ addEventListener('resize', resize);
 resize();
 
 // ---- crawling and looking. Drag to turn your head, hold still to crawl where you look (drag while holding
-// to steer), tap anywhere to throw spores at the sight in the middle of the screen. Space throws too. Keys: W or up crawls, S or down backs off, A D or left right
+// to steer; crawl straight into a trunk and you climb it), tap anywhere to throw spores at the sight in the middle of the screen. Space throws too. Keys: W or up crawls (shift runs), S or down backs off, A D or left right
 // turn your head.
-const me = { x: 0, z: 0, y: 0, speed: 0, bob: 0 };
+// climbing: the trunk you are on, the angle round it (atan2 of z, x) and the height over its foot
+const me = { x: 0, z: 0, y: 0, speed: 0, bob: 0, climb: null as null | { t: Trunk; phi: number; h: number } };
+const CLIMB_MAX = 2; // a bit up the trunk: high enough to look down on the moss and the ferns, not into the haze
 const look = { yaw: 0, pitch: 0.12, tYaw: 0, tPitch: 0.12 }; // a little up: the fern over you
 const PITCH_MIN = -0.6, PITCH_MAX = 0.85; // up far enough to see under a cap, not past it
+// on a trunk you can look straight down past your feet
+const clampPitch = (v: number) => THREE.MathUtils.clamp(v, me.climb ? -1.45 : PITCH_MIN, PITCH_MAX);
 let holding = false;
 const autoWalk = params.has('walk'); // ?walk: crawls by itself, for clips
 const keys = new Set<string>();
@@ -292,8 +296,10 @@ const target = document.querySelector<HTMLElement>('.target')!;
 let down = false, dragging = false;
 let downAt = 0, downX = 0, downY = 0, lastX = 0, lastY = 0;
 let holdTimer = 0;
+let charging = false; // a mouse held down: a throw wound up
+let look0 = { yaw: 0, pitch: 0 }; // where you looked when the finger went down: a flick up gives the look back
 // the pointer lock (desktop, the pill bottom right or L): the mouse itself is the look, no drag; click throws,
-// hold the button to crawl
+// hold the button to fling at the sight
 const locked = () => document.pointerLockElement === canvas;
 const lockPill = document.querySelector<HTMLButtonElement>('.lockpill')!;
 const lock = () => { if (!fungarium.isOpen) canvas.requestPointerLock?.(); };
@@ -303,19 +309,24 @@ document.addEventListener('pointerlockchange', () => document.body.classList.tog
 // finger went down, you also keep turning that way, faster the further out, so a hairpin needs no second swipe
 const DRAG_TURN = 2.2, STEER_RATE = 2.4, STEER_DEAD = 14;
 canvas.addEventListener('pointerdown', (e) => {
-  if (!locked()) canvas.setPointerCapture(e.pointerId);
+  if (!locked()) try { canvas.setPointerCapture(e.pointerId); } catch { /* a synthetic pointer */ }
   down = true; dragging = false;
   downAt = performance.now(); downX = lastX = e.clientX; downY = lastY = e.clientY;
+  look0 = { yaw: look.tYaw, pitch: look.tPitch };
   clearTimeout(holdTimer);
-  // held without sliding: crawl
-  holdTimer = window.setTimeout(() => { if (down && !dragging) holding = true; }, 220);
+  // held without sliding: a finger crawls; a mouse winds up a throw at the sight, let go to fling it (the keys crawl)
+  const mouse = e.pointerType === 'mouse';
+  holdTimer = window.setTimeout(() => {
+    if (!down || dragging) return;
+    if (mouse) { charging = true; target.classList.add('charge'); } else holding = true;
+  }, 220);
 });
 canvas.addEventListener('pointermove', (e) => {
   if (locked()) {
     // locked: mouse right looks right, up looks up, as in a shooter
     const k = THREE.MathUtils.degToRad(camera.fov) / innerHeight * 1.6;
     look.tYaw -= e.movementX * k;
-    look.tPitch = THREE.MathUtils.clamp(look.tPitch - e.movementY * k, PITCH_MIN, PITCH_MAX);
+    look.tPitch = clampPitch(look.tPitch - e.movementY * k);
     return;
   }
   if (!down) return;
@@ -326,15 +337,23 @@ canvas.addEventListener('pointermove', (e) => {
     look.tYaw += (e.clientX - lastX) * k * (holding ? -1 : 1);
     // up and down: a finger drags the world (up looks down), a mouse points (up looks up)
     const tilt = e.pointerType === 'mouse' ? -1 : 1;
-    look.tPitch = THREE.MathUtils.clamp(look.tPitch + (e.clientY - lastY) * k * tilt, PITCH_MIN, PITCH_MAX);
+    look.tPitch = clampPitch(look.tPitch + (e.clientY - lastY) * k * tilt);
   }
   lastX = e.clientX; lastY = e.clientY;
 });
 const release = (e: PointerEvent) => {
   clearTimeout(holdTimer);
-  const tap = !holding && !dragging && performance.now() - downAt < 350;
-  down = false; holding = false; dragging = false;
-  if (tap && e.type === 'pointerup') throwAt();
+  const quick = performance.now() - downAt < 350;
+  const tap = !holding && !dragging && !charging && quick;
+  // a finger flicked up, quick and mostly straight: fling at the sight (and the look it dragged goes back)
+  const dx = e.clientX - downX, dy = e.clientY - downY;
+  const flick = e.pointerType !== 'mouse' && !holding && quick && dy < -40 && -dy > 1.5 * Math.abs(dx);
+  if (flick) { look.tYaw = look0.yaw; look.tPitch = look0.pitch; }
+  const fling = (charging || flick) && e.type === 'pointerup';
+  down = false; holding = false; dragging = false; charging = false;
+  target.classList.remove('charge');
+  if (fling) throwAt();
+  else if (tap && e.type === 'pointerup') throwNear(); // a pinch dropped just in front of you
 };
 canvas.addEventListener('pointerup', release);
 canvas.addEventListener('pointercancel', release);
@@ -356,7 +375,7 @@ function onTilt(e: DeviceOrientationEvent) {
     let dPitch = pitch - gyroLast.pitch;
     if (Math.abs(dPitch) > 90) dPitch = 0; // a flip through the vertical, not a real move
     look.tYaw += dYaw * THREE.MathUtils.DEG2RAD;
-    look.tPitch = THREE.MathUtils.clamp(look.tPitch + dPitch * THREE.MathUtils.DEG2RAD, PITCH_MIN, PITCH_MAX);
+    look.tPitch = clampPitch(look.tPitch + dPitch * THREE.MathUtils.DEG2RAD);
   }
   gyroLast = { yaw, pitch };
 }
@@ -430,11 +449,21 @@ function aimAt(far = 2.2) {
   const x = camera.position.x + (d.x / l) * far, z = camera.position.z + (d.z / l) * far;
   return new THREE.Vector3(x, groundHeight(x, z), z);
 }
-function throwAt() {
-  const hit = aimAt();
-  target.classList.remove('fire');
-  void target.offsetWidth; // restart the pulse
-  target.classList.add('fire');
+/** A pinch of spores dropped just in front of you, a hand's length or two, a little to either side. */
+function throwNear() {
+  const fx = -Math.sin(look.yaw), fz = -Math.cos(look.yaw), sx = -fz, sz = fx;
+  const d = 0.3 + 0.15 * Math.random(), s = (Math.random() - 0.5) * 0.12;
+  const x = camera.position.x + fx * d + sx * s, z = camera.position.z + fz * d + sz * s;
+  throwTo(new THREE.Vector3(x, groundHeight(x, z), z), false);
+}
+/** Flung at the sight, arcing over the moss like a grenade. */
+function throwAt() { throwTo(aimAt(), true); }
+function throwTo(hit: THREE.Vector3, far: boolean) {
+  if (far) {
+    target.classList.remove('fire');
+    void target.offsetWidth; // restart the pulse
+    target.classList.add('fire');
+  }
   // tapping a ripe puffball presses it, and it puffs its spores, instead of throwing
   const pressed = fungi.press(hit.x, hit.z, 0.03);
   if (pressed) { spores.puff(pressed); return; }
@@ -448,14 +477,17 @@ function throwAt() {
   pouch.kick();
   const from = camera.position.clone().add(new THREE.Vector3(0, -0.03, 0)).addScaledVector(camera.getWorldDirection(new THREE.Vector3()), 0.15);
   const kind = throwKind;
-  spores.throw(from, hit, (p) => {
+  const land = (p: THREE.Vector3) => {
     // the cloud settles first; then, one after another, they push up
     setTimeout(() => {
       // a minute or two after it has grown, it withers away again; the ones found in the forest stay
       fungi.spawn(kind, p.x, fungusFoot(p.x, p.z), p.z, { wither: 70 + 50 * Math.random() });
       dropOldest();
     }, 1200);
-  });
+  };
+  // sown: no throw, just a cloud let go there; flung: an arc over the moss and a burst where it lands
+  if (far) spores.throw(from, hit, land);
+  else { spores.sow(hit); land(hit); }
 }
 
 /** Distance to the first thing the view ray hits: the moss or a mushroom. The lens focuses there. */
@@ -480,28 +512,17 @@ function crawl(dt: number) {
     const off = lastX - downX, out = Math.max(0, Math.abs(off) - STEER_DEAD) / (Math.min(innerWidth, innerHeight) * 0.3);
     look.tYaw -= Math.sign(off) * Math.min(1, out) * STEER_RATE * dt;
   }
-  me.speed += (fwd * 0.36 - me.speed) * Math.min(1, dt * 4);
+  // shift held: run, twice the pace (the six legs patter faster with it)
+  const run = keys.has('ShiftLeft') || keys.has('ShiftRight') ? 2 : 1;
+  me.speed += (fwd * 0.36 * run - me.speed) * Math.min(1, dt * 4);
   const fx = -Math.sin(look.yaw), fz = -Math.cos(look.yaw); // you crawl where you look
   // six legs, three down at a time (a tripod gait): no lumbering, a quick even patter, each set of three
   // giving a little shove forward as it pushes off
   const walking = Math.min(1, Math.abs(me.speed) / 0.2);
   me.bob += dt * (5 + 30 * Math.abs(me.speed));
   const shove = 1 + 0.35 * Math.sin(me.bob * 2) * walking;
-  me.x += fx * me.speed * shove * dt;
-  me.z += fz * me.speed * shove * dt;
-  // the tight bunch of stipes at a fern's crown is solid; the fronds you crawl under; small fungi you crawl over,
-  // and a puffball you crawl into puffs
-  const bumped = fungi.press(me.x + fx * 0.06, me.z + fz * 0.06, 0.02);
-  if (bumped) spores.puff(bumped);
-  [me.x, me.z] = trees.collide(me.x, me.z, 0.05);
-  for (const c of ferns.crowns) {
-    const dx = me.x - c.x, dz = me.z - c.z, d = Math.hypot(dx, dz), min = 0.05;
-    if (d < min && d > 1e-6) { me.x = c.x + (dx / d) * min; me.z = c.z + (dz / d) * min; }
-  }
-  // a worm's eye: just over the moss, rising and falling with it, a slow heave while crawling
-  const g = groundHeight(me.x, me.z);
-  const ground = g + 0.055 * mossAt(me.x, g, me.z) + 0.11; // just over the frond tips
-  me.y += (ground - me.y) * Math.min(1, dt * 6);
+  if (me.climb) climb(dt, fx, fz, me.speed * shove);
+  else walk(dt, fx, fz, me.speed * shove);
   // eased a little: a head turning, not a mouse
   look.yaw += (look.tYaw - look.yaw) * Math.min(1, dt * 10);
   look.pitch += (look.tPitch - look.pitch) * Math.min(1, dt * 10);
@@ -511,6 +532,60 @@ function crawl(dt: number) {
   camera.rotation.set(look.pitch + Math.sin(me.bob * 2 + 0.6) * 0.0035 * walking, look.yaw, Math.sin(me.bob) * 0.004 * walking);
   camera.updateMatrixWorld();
   return { fx, fz };
+}
+
+/** On the ground: over the moss, round the stipes, and up a trunk if you crawl straight into one. */
+function walk(dt: number, fx: number, fz: number, v: number) {
+  me.x += fx * v * dt;
+  me.z += fz * v * dt;
+  // the tight bunch of stipes at a fern's crown is solid; the fronds you crawl under; small fungi you crawl over,
+  // and a puffball you crawl into puffs
+  const bumped = fungi.press(me.x + fx * 0.06, me.z + fz * 0.06, 0.02);
+  if (bumped) spores.puff(bumped);
+  const [cx, cz] = trees.collide(me.x, me.z, 0.05);
+  if (v > 0.05 && (cx !== me.x || cz !== me.z)) {
+    // pushed off a trunk while crawling at it head on: start up it
+    const t = trees.trunks.reduce((a, b) => (Math.hypot(b.x - me.x, b.z - me.z) - b.r < Math.hypot(a.x - me.x, a.z - me.z) - a.r ? b : a));
+    const ox = cx - t.x, oz = cz - t.z, d = Math.hypot(ox, oz);
+    // (not looking down: climbing down facing the bark lets you off without catching you again)
+    if (-(fx * ox + fz * oz) / d > 0.75 && look.pitch > -0.35) me.climb = { t, phi: Math.atan2(oz, ox), h: me.y - trunkFoot(t) };
+  }
+  me.x = cx; me.z = cz;
+  for (const c of ferns.crowns) {
+    const dx = me.x - c.x, dz = me.z - c.z, d = Math.hypot(dx, dz), min = 0.05;
+    if (d < min && d > 1e-6) { me.x = c.x + (dx / d) * min; me.z = c.z + (dz / d) * min; }
+  }
+  // a worm's eye: just over the moss, rising and falling with it, a slow heave while crawling
+  const g = groundHeight(me.x, me.z);
+  const ground = g + 0.055 * mossAt(me.x, g, me.z) + 0.11; // just over the frond tips
+  me.y += (ground - me.y) * Math.min(1, dt * 6);
+}
+
+/**
+ * On a trunk: you crawl over the bark where you look. Facing the trunk, forward is up; facing away, down; to
+ * the side, round it. Looking up or down adds to it. Climb down to the moss and you are on the ground again.
+ */
+function climb(dt: number, fx: number, fz: number, v: number) {
+  const c = me.climb!;
+  const nx = Math.cos(c.phi), nz = Math.sin(c.phi); // out of the bark
+  const cp = Math.cos(look.pitch), sp = Math.sin(look.pitch);
+  let up = -(fx * nx + fz * nz) * cp + sp, round = (-fx * nz + fz * nx) * cp;
+  const l = Math.hypot(up, round);
+  if (l > 1) { up /= l; round /= l; }
+  v *= 0.7; // slower up a trunk than over the moss
+  c.h = Math.min(CLIMB_MAX, c.h + up * v * dt);
+  const R = trunkRadius(c.t, c.phi, c.h) + 0.11; // the eye a worm's height off the bark
+  c.phi += (round * v * dt) / R;
+  const x = c.t.x + Math.cos(c.phi) * R, z = c.t.z + Math.sin(c.phi) * R, y = trunkFoot(c.t) + c.h;
+  // eased onto the bark, so getting on is a move and not a jump
+  const k = Math.min(1, dt * 10);
+  me.x += (x - me.x) * k; me.z += (z - me.z) * k; me.y += (y - me.y) * k;
+  // down at the moss: off the trunk
+  const g = groundHeight(x, z);
+  if (up * v < 0 && y < g + 0.055 * mossAt(x, g, z) + 0.11) {
+    me.climb = null;
+    look.tPitch = clampPitch(look.tPitch);
+  }
 }
 
 // first build: everything in range before the first frame, so you do not start in a void
