@@ -197,16 +197,25 @@ function lay(intent: Intent, stroke: V[], bridge: boolean, houses: Rect[] = NO_H
 
 // ---------- smearing: push the paint that is there ----------
 
-export const SMEAR_R = 65;
+/**
+ * The smear as it is set: how far it reaches in metres, and how its pull falls off from the grab to the edge of that
+ * reach: the power the curve is raised to, 1 a broad dome, 2 a soft bell, 4 a sharp peak. Set through `smearSet` in wet.ts,
+ * which keeps the shaders with it.
+ */
+export const SMEAR = { r: 65, fall: 2 };
+/** How much of the pull is left this far from the grab. */
+export const smearFall = (d: number) => (d >= SMEAR.r ? 0 : (1 - (d / SMEAR.r) ** 2) ** SMEAR.fall);
 
 /** Give the strokes near p enough points to bend. Parking aisles stay as they are: their stalls need straight rows. */
 export function smearStart(intent: Intent, p: V): Intent {
   return intent.map((s) => {
-    if (s.lot || nearest(s.pts, p).d > SMEAR_R) return s;
+    if (s.lot || nearest(s.pts, p).d > SMEAR.r) return s;
+    // a point every few metres, more of them the smaller the smear: it bends as finely as it is narrow
+    const every = Math.max(5, Math.min(9, SMEAR.r / 8));
     const pts: V[] = [s.pts[0]];
     for (let i = 1; i < s.pts.length; i++) {
       const a = s.pts[i - 1], b = s.pts[i];
-      const n = Math.max(1, Math.ceil(dist(a, b) / 12));
+      const n = Math.max(1, Math.ceil(dist(a, b) / every));
       for (let k = 1; k <= n; k++) pts.push(k === n ? b : { x: a.x + ((b.x - a.x) * k) / n, y: a.y + ((b.y - a.y) * k) / n });
     }
     return { ...s, pts };
@@ -226,8 +235,8 @@ export function smear(base: Intent, from: V, to: V): Intent {
     let moved = false;
     const pts = s.pts.map((p) => {
       const d = dist(p, from);
-      if (d >= SMEAR_R || far(p) || held(p)) return p;
-      const w = (1 - (d / SMEAR_R) ** 2) ** 2;
+      if (d >= SMEAR.r || far(p) || held(p)) return p;
+      const w = smearFall(d);
       moved = true;
       return { x: p.x + dx * w, y: p.y + dy * w };
     });
@@ -306,12 +315,24 @@ export function tidy(intent: Intent, moved: number[], houses: Rect[] = NO_HOUSES
  * Each sample is tested once per drag, so a drag that doubles back still takes one size. Same array if nothing is hit.
  */
 export function erase(intent: Intent, drag: V[], reach: number): Intent {
+  return resize(intent, drag, reach, (w) => w - 1, false);
+}
+
+/**
+ * Give the roads a drag passes over another size, along the stretch it passes: `to` says which, from the size they are.
+ * With `keep` nothing goes: the size stays between a driveway and an arterial, and a bridge or a roundabout changes
+ * size whole. Without it this is the eraser. `only`: the strokes it may touch. Same array if nothing changes.
+ */
+export function resize(intent: Intent, drag: V[], reach: number, to: (w: number) => number, keep: boolean, only?: Set<number>): Intent {
   if (drag.length < 2) return intent;
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
   for (const p of drag) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); }
   let changed = false;
   const out: Intent = [];
-  for (const s of intent) {
+  for (let n = 0; n < intent.length; n++) {
+    const s = intent[n];
+    // only these strokes, if any are named: a road is resized, not what crosses it
+    if (only && !only.has(n)) { out.push(s); continue; }
     // a lot stays, and so does anything well away from the drag
     let sx0 = Infinity, sy0 = Infinity, sx1 = -Infinity, sy1 = -Infinity;
     for (const p of s.pts) { sx0 = Math.min(sx0, p.x); sy0 = Math.min(sy0, p.y); sx1 = Math.max(sx1, p.x); sy1 = Math.max(sy1, p.y); }
@@ -322,11 +343,14 @@ export function erase(intent: Intent, drag: V[], reach: number): Intent {
     const N = Math.max(1, Math.ceil(len / 2));
     const on = Array.from({ length: N + 1 }, (_, k) => nearest(drag, pointOn(s.pts, cum, (len * k) / N)).d < reach);
     if (!on.some(Boolean)) { out.push(s); continue; }
+    const w = keep ? Math.max(1, Math.min(3, to(s.w))) : to(s.w);
+    // that size already
+    if (w === s.w) { out.push(s); continue; }
     changed = true;
     // a bridge is taken whole, and a ring is one road: it cannot be cut
-    if (s.bridge) continue;
+    if (s.bridge) { if (keep) out.push({ ...s, w }); continue; }
     if (s.ring) {
-      if (s.w - 1 >= 1) out.push({ ...s, w: s.w - 1 });
+      if (w >= 1) out.push({ ...s, w });
       continue;
     }
     // the stretches the drag passes over, and the ones it does not
@@ -336,7 +360,7 @@ export function erase(intent: Intent, drag: V[], reach: number): Intent {
       const a = (len * k0) / N, b = (len * k) / N;
       if (on[k0]) {
         // one size off this stretch; a driveway is taken altogether
-        if (s.w - 1 >= 1 && b - a > 1) out.push({ ...s, pts: piece(s.pts, cum, a, b), w: s.w - 1 });
+        if (w >= 1 && b - a > 1) out.push({ ...s, pts: piece(s.pts, cum, a, b), w });
       } else if (b - a > 1) out.push({ ...s, pts: piece(s.pts, cum, a, b) });
       k0 = k;
     }
