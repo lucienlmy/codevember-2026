@@ -18,6 +18,7 @@ import { Fungi, type FungusKind } from './fungi';
 import { Spores } from './spores';
 import { Fungarium, type Species } from './fungarium';
 import { Pouch } from './pouch';
+import { Sound } from './sound';
 import { Ants } from './ants';
 import { mulberry32 } from './noise';
 
@@ -105,6 +106,10 @@ const fungi = new Fungi(share, dewMaterial);
 scene.add(fungi.group);
 // the spore smoke is drawn after the atmosphere, in a scene of its own (see the render chain)
 const spores = new Spores(share);
+// a whoosh when you fling, a puff where it lands and where you sow
+const sound = new Sound(camera);
+const creakAt = new THREE.Vector3();
+const creakNext = new WeakMap<object, number>(); // when each growing cluster creaks next
 const fxScene = new THREE.Scene();
 fxScene.add(spores.mesh);
 // where a cluster stands: its foot down in the moss, stems coming up through it
@@ -443,13 +448,15 @@ setTimeout(() => pouch.setThumbs(fungarium.drawThumbs()), 1500);
 function plantAt(s: Species) {
   const hit = aimAt(0.45);
   pouch.pick(s.kind, true);
-  fungi.spawn(s.kind, hit.x, fungusFoot(hit.x, hit.z), hit.z, { seed: s.seed, scale: s.scale, wither: 70 + 50 * Math.random() });
+  fungi.spawn(s.kind, hit.x, fungusFoot(hit.x, hit.z), hit.z, { seed: s.seed, scale: s.scale });
   dropOldest();
 }
+// What you grow stays, up to so many; past that the oldest withers away (back into the moss over sixteen seconds),
+// one for each new one. (They withered on a timer for a while, a minute or two after growing.)
+const KEEP = coarse ? 100 : 300;
 function dropOldest() {
-  // only so many: the oldest thrown ones go
-  const thrown = fungi.list.filter((c) => !c.key);
-  for (const c of thrown.slice(0, Math.max(0, thrown.length - 24))) fungi.remove(c);
+  const standing = fungi.list.filter((c) => !c.key && c.wither === undefined);
+  for (const c of standing.slice(0, Math.max(0, standing.length - KEEP))) c.wither = c.age;
 }
 addEventListener('keydown', (e) => {
   if (e.code === 'KeyF') { keys.clear(); if (locked()) document.exitPointerLock(); fungarium.toggle(); }
@@ -488,9 +495,6 @@ function throwTo(hit: THREE.Vector3, far: boolean) {
     void target.offsetWidth; // restart the pulse
     target.classList.add('fire');
   }
-  // tapping a ripe puffball presses it, and it puffs its spores, instead of throwing
-  const pressed = fungi.press(hit.x, hit.z, 0.03);
-  if (pressed) { spores.puff(pressed); return; }
   // not right at your own feet
   const fromCam = new THREE.Vector3(hit.x - camera.position.x, 0, hit.z - camera.position.z);
   if (fromCam.length() < 0.22) {
@@ -501,33 +505,40 @@ function throwTo(hit: THREE.Vector3, far: boolean) {
   pouch.kick();
   const from = camera.position.clone().add(new THREE.Vector3(0, -0.03, 0)).addScaledVector(camera.getWorldDirection(new THREE.Vector3()), 0.15);
   const kind = throwKind;
-  const land = (p: THREE.Vector3) => {
+  const land = (p: THREE.Vector3, size: number) => {
+    sound.puff(p, size);
     // the cloud settles first; then, one after another, they push up
     setTimeout(() => {
-      // a minute or two after it has grown, it withers away again; the ones found in the forest stay
-      fungi.spawn(kind, p.x, fungusFoot(p.x, p.z), p.z, { wither: 70 + 50 * Math.random() });
+      fungi.spawn(kind, p.x, fungusFoot(p.x, p.z), p.z);
       dropOldest();
     }, 1200);
   };
   // sown: no throw, just a cloud let go there; flung: an arc over the moss and a burst where it lands
-  if (far) spores.throw(from, hit, land);
+  if (far) {
+    spores.throw(from, hit, (p) => land(p, 1));
+    sound.whoosh(0.5 + from.distanceTo(hit) * 0.3); // as long as the flight
+  }
   else {
     // the cloud is let go over the moss's top, not in it: down among the fronds it was hidden
     const g = groundHeight(hit.x, hit.z);
     spores.sow(new THREE.Vector3(hit.x, g + 0.055 * mossAt(hit.x, g, hit.z) + 0.035, hit.z));
-    land(hit);
+    land(hit, 0.45);
   }
 }
 
 /** Distance to the first thing the view ray hits: the moss or a mushroom. The lens focuses there. */
 const ray = new THREE.Vector3();
+const FOCUS_FUNGI = 3; // only fungi this near are tried: past that the moss or a trunk is found anyway, and with
+// hundreds sown, trying them all at every step of the ray was the cost
 function focusDistance() {
   camera.getWorldDirection(ray);
   const o = camera.position;
+  const nearFungi = fungi.list.filter((c) => Math.hypot(c.x - o.x, c.z - o.z) < FOCUS_FUNGI + c.radius);
+  const nearTrunks = trees.trunks.filter((t) => Math.hypot(t.x - o.x, t.z - o.z) < 8 + t.r * 1.6);
   for (let t = 0.03; t < 8; t += t < 1 ? 0.01 : 0.04) {
     const x = o.x + ray.x * t, y = o.y + ray.y * t, z = o.z + ray.z * t;
     if (y < groundHeight(x, z) + 0.05) return t;
-    if (fungi.hit(x, y, z) || trees.hit(x, y, z)) return t;
+    if ((t < FOCUS_FUNGI && fungi.hit(x, y, z, nearFungi)) || trees.hit(x, y, z, nearTrunks)) return t;
   }
   return 8;
 }
@@ -571,10 +582,7 @@ function crawl(dt: number) {
 function walk(dt: number, fx: number, fz: number, v: number) {
   me.x += fx * v * dt - fz * me.side * dt;
   me.z += fz * v * dt + fx * me.side * dt;
-  // the tight bunch of stipes at a fern's crown is solid; the fronds you crawl under; small fungi you crawl over,
-  // and a puffball you crawl into puffs
-  const bumped = fungi.press(me.x + fx * 0.06, me.z + fz * 0.06, 0.02);
-  if (bumped) spores.puff(bumped);
+  // the tight bunch of stipes at a fern's crown is solid; the fronds you crawl under; small fungi you crawl over
   const [cx, cz] = trees.collide(me.x, me.z, 0.05);
   if (v > 0.05 && (cx !== me.x || cz !== me.z)) {
     // pushed off a trunk while crawling at it head on: start up it
@@ -639,13 +647,28 @@ const sunScreen = new THREE.Vector3();
 const camDir = new THREE.Vector3();
 let focus = 1;
 // dev: tuning handles in the console
-if (import.meta.env.DEV) Object.assign(window, { trees, ants, ferns, props, fungi, fungarium, spores, throwAt, shellMat, lensMat, atmosMat, camera, aoPass, lens, atmos, beautyRT, scene, renderer, composer, world, me, look });
+if (import.meta.env.DEV) Object.assign(window, { sound, trees, ants, ferns, props, fungi, fungarium, spores, throwAt, shellMat, lensMat, atmosMat, camera, aoPass, lens, atmos, beautyRT, scene, renderer, composer, world, me, look });
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.05);
   shellMat.uniforms.uTime.value = clock.elapsedTime;
   const { fx, fz } = crawl(dt);
   pouch.update(dt, me.bob, Math.min(1, Math.abs(me.speed) / 0.2));
-  fungi.update(dt, clock.elapsedTime);
+  fungi.update(dt, clock.elapsedTime, me.x, me.z);
+  // the ones growing near you creak now and then, each kind in its own voice
+  // (unevenly: each waits a random while, long or short, and now and then two or three come in a run)
+  const tNow = clock.elapsedTime;
+  for (const c of fungi.list) {
+    if (c.grown || c.age <= 0) continue;
+    const g = c.age / c.end;
+    if (g < 0.03 || g > 0.97) continue;
+    const next = creakNext.get(c);
+    if (next === undefined) { creakNext.set(c, tNow + Math.random() * 1.5); continue; }
+    if (tNow < next) continue;
+    creakAt.set(c.x, c.y + c.height * 0.5, c.z);
+    sound.creak(creakAt, c.kind);
+    const burst = Math.random() < 0.3;
+    creakNext.set(c, tNow + (burst ? 0.12 + 0.3 * Math.random() : -Math.log(1 - Math.random()) * 1.3 + 0.15));
+  }
   spores.update(dt, clock.elapsedTime);
   world.update(me.x, me.z, fx, fz, 1);
   props.update(me.x, me.z);
