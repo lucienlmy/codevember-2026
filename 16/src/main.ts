@@ -8,7 +8,7 @@ import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { shellVertex, shellFragment, mossLighting } from './shaders';
-import { World, groundHeight, mossAt, type WorldHooks } from './world';
+import { World, groundHeight, baseHeight, mossAt, type WorldHooks } from './world';
 import { Props } from './props';
 import { Ferns } from './ferns';
 import { Trees, trunkFoot, trunkRadius, type Trunk } from './trees';
@@ -18,6 +18,7 @@ import { Fungi, type FungusKind } from './fungi';
 import { Spores } from './spores';
 import { Fungarium, type Species } from './fungarium';
 import { Pouch } from './pouch';
+import { Ants } from './ants';
 import { mulberry32 } from './noise';
 
 // ?clean: the scene alone, no furniture (docs/DESIGN.md)
@@ -63,7 +64,7 @@ const shellMat = new THREE.ShaderMaterial({
     uShadowMap: { value: null },
     uShadowMatrix: { value: new THREE.Matrix4() },
     uShadowOn: { value: 0 },
-    uShadowFloor: { value: 0.14 },
+    uShadowFloor: { value: 0.2 },
     uTime: { value: 0 },
   },
 });
@@ -153,6 +154,9 @@ scene.add(ferns.root);
 // spruce trunks, three levels of detail
 const trees = new Trees(share);
 scene.add(trees.root);
+// wood ants on trails from a nest in the moss up the trunks
+const ants = new Ants(share);
+scene.add(ants.mesh);
 
 // the floor beyond the chunks: a big plane a hair under the moss, following the swells, recentred as you go
 const farGeo = new THREE.PlaneGeometry(60, 60, 90, 90);
@@ -169,7 +173,7 @@ function placeFarFloor(px: number, pz: number) {
   const p = farGeo.attributes.position as THREE.BufferAttribute;
   for (let i = 0; i < p.count; i++) {
     const x = farBase[i * 3] + sx, z = farBase[i * 3 + 2] + sz;
-    p.setXYZ(i, x, groundHeight(x, z) - 0.03, z);
+    p.setXYZ(i, x, baseHeight(x, z) - 0.03, z); // not the hills at the trunks: on this coarse grid they were tents through the trunks' feet
   }
   p.needsUpdate = true;
   farGeo.computeVertexNormals();
@@ -207,6 +211,7 @@ function renderShadow(centre: THREE.Vector3) {
   world.forShadow(true, centre.x, centre.z, 4.3);
   ferns.forShadow(true, centre.x, centre.z, 6);
   farFloor.visible = false;
+  ants.mesh.visible = false; // too small to cast anything worth the map
   renderer.setRenderTarget(shadowRT);
   renderer.clear();
   renderer.render(scene, lightCam);
@@ -214,6 +219,7 @@ function renderShadow(centre: THREE.Vector3) {
   world.forShadow(false);
   ferns.forShadow(false);
   farFloor.visible = true;
+  ants.mesh.visible = true;
   u.uShadowMap.value = shadowRT.depthTexture;
   u.uShadowMatrix.value.multiplyMatrices(lightCam.projectionMatrix, lightCam.matrixWorldInverse);
   u.uShadowOn.value = 1;
@@ -290,6 +296,7 @@ const PITCH_MIN = -0.6, PITCH_MAX = 0.85; // up far enough to see under a cap, n
 // on a trunk you can look straight down past your feet
 const clampPitch = (v: number) => THREE.MathUtils.clamp(v, me.climb ? -1.45 : PITCH_MIN, PITCH_MAX);
 let holding = false;
+let backing = false; // a finger held low on the screen: crawl backwards
 const autoWalk = params.has('walk'); // ?walk: crawls by itself, for clips
 const keys = new Set<string>();
 const target = document.querySelector<HTMLElement>('.target')!;
@@ -318,7 +325,7 @@ canvas.addEventListener('pointerdown', (e) => {
   const mouse = e.pointerType === 'mouse';
   holdTimer = window.setTimeout(() => {
     if (!down || dragging) return;
-    if (mouse) { charging = true; target.classList.add('charge'); } else holding = true;
+    if (mouse) { charging = true; target.classList.add('charge'); } else { holding = true; backing = downY > innerHeight * 0.78; }
   }, 220);
 });
 canvas.addEventListener('pointermove', (e) => {
@@ -335,8 +342,9 @@ canvas.addEventListener('pointermove', (e) => {
     const k = THREE.MathUtils.degToRad(camera.fov) / innerHeight * DRAG_TURN;
     // just looking you drag the world round; crawling you steer, so drag left and you turn left
     look.tYaw += (e.clientX - lastX) * k * (holding ? -1 : 1);
-    // up and down: a finger drags the world (up looks down), a mouse points (up looks up)
-    const tilt = e.pointerType === 'mouse' ? -1 : 1;
+    // up and down: a finger just looking drags the world (up looks down), a mouse points (up looks up)
+    // crawling, a finger steers the same way: up looks up, as left turns left
+    const tilt = e.pointerType === 'mouse' || holding ? -1 : 1;
     look.tPitch = clampPitch(look.tPitch + (e.clientY - lastY) * k * tilt);
   }
   lastX = e.clientX; lastY = e.clientY;
@@ -353,7 +361,8 @@ const release = (e: PointerEvent) => {
   down = false; holding = false; dragging = false; charging = false;
   target.classList.remove('charge');
   if (fling) throwAt();
-  else if (tap && e.type === 'pointerup') throwNear(); // a pinch dropped just in front of you
+  // a pinch sown where you clicked (locked, there is no pointer: at the sight)
+  else if (tap && e.type === 'pointerup') { if (locked()) throwNear(); else throwNear(e.clientX, e.clientY); }
 };
 canvas.addEventListener('pointerup', release);
 canvas.addEventListener('pointercancel', release);
@@ -414,11 +423,12 @@ function groundAt(cx: number, cy: number) {
   return null;
 }
 
-// the fungarium: pick what your spores grow, and watch it grow up close (the button top right, or F)
+// the fungarium: pick what your spores grow, and watch it grow up close (tap the packet, or F)
 let throwKind: FungusKind = 'funnel';
 const fungarium = new Fungarium((kind) => { throwKind = kind; pouch.pick(kind, false); });
 // the pouch in hand: the same choice, with number keys, the wheel or a tap on it; shift and a number plants one
-const pouch = new Pouch((kind) => { throwKind = kind; fungarium.select(kind); }, plantAt, () => fungarium.isOpen);
+// tapped, the packet opens the fungarium (a little notebook sat bottom left for that, for a while)
+const pouch = new Pouch((kind) => { throwKind = kind; fungarium.select(kind); }, plantAt, () => fungarium.isOpen, () => { keys.clear(); fungarium.toggle(); });
 // the specimens are drawn once things have settled, on the fungarium's own little renderer
 setTimeout(() => pouch.setThumbs(fungarium.drawThumbs()), 1500);
 /** Shift and a number: that species' specimen pushes up where you aim (the middle of the screen without a mouse). */
@@ -433,7 +443,6 @@ function dropOldest() {
   const thrown = fungi.list.filter((c) => !c.key);
   for (const c of thrown.slice(0, Math.max(0, thrown.length - 24))) fungi.remove(c);
 }
-document.querySelector('.book')!.addEventListener('click', () => { keys.clear(); fungarium.toggle(); });
 addEventListener('keydown', (e) => {
   if (e.code === 'KeyF') { keys.clear(); if (locked()) document.exitPointerLock(); fungarium.toggle(); }
   if (e.code === 'KeyL' && !fungarium.isOpen && !coarse) { if (locked()) document.exitPointerLock(); else lock(); }
@@ -449,11 +458,18 @@ function aimAt(far = 2.2) {
   const x = camera.position.x + (d.x / l) * far, z = camera.position.z + (d.z / l) * far;
   return new THREE.Vector3(x, groundHeight(x, z), z);
 }
-/** A pinch of spores dropped just in front of you, a hand's length or two, a little to either side. */
-function throwNear() {
-  const fx = -Math.sin(look.yaw), fz = -Math.cos(look.yaw), sx = -fz, sz = fx;
-  const d = 0.3 + 0.15 * Math.random(), s = (Math.random() - 0.5) * 0.12;
-  const x = camera.position.x + fx * d + sx * s, z = camera.position.z + fz * d + sz * s;
+/** A pinch of spores sown where you click or tap: where that point's ray meets the moss, so they come up right
+ * there; but never nearer than 45 cm (closer, they grew up out of focus) nor further than 1.6 m (not across the
+ * forest): pulled in or pushed out along the same line of sight, so they stay under the pointer on screen. Into
+ * the air it goes 1.6 m that way. */
+function throwNear(cx = innerWidth / 2, cy = innerHeight / 2) {
+  const hit = groundAt(cx, cy);
+  const o = camera.position, r = rc.ray.direction; // groundAt aimed the ray through the point
+  const h = Math.hypot(r.x, r.z) || 1;
+  // how far along the line of sight, measured flat
+  const d = hit ? Math.hypot(hit.x - o.x, hit.z - o.z) : Infinity;
+  const D = THREE.MathUtils.clamp(d, 0.45, 1.6);
+  const x = o.x + (r.x / h) * D, z = o.z + (r.z / h) * D;
   throwTo(new THREE.Vector3(x, groundHeight(x, z), z), false);
 }
 /** Flung at the sight, arcing over the moss like a grenade. */
@@ -487,7 +503,12 @@ function throwTo(hit: THREE.Vector3, far: boolean) {
   };
   // sown: no throw, just a cloud let go there; flung: an arc over the moss and a burst where it lands
   if (far) spores.throw(from, hit, land);
-  else { spores.sow(hit); land(hit); }
+  else {
+    // the cloud is let go over the moss's top, not in it: down among the fronds it was hidden
+    const g = groundHeight(hit.x, hit.z);
+    spores.sow(new THREE.Vector3(hit.x, g + 0.055 * mossAt(hit.x, g, hit.z) + 0.035, hit.z));
+    land(hit);
+  }
 }
 
 /** Distance to the first thing the view ray hits: the moss or a mushroom. The lens focuses there. */
@@ -504,7 +525,7 @@ function focusDistance() {
 }
 
 function crawl(dt: number) {
-  const fwd = (keys.has('KeyW') || keys.has('ArrowUp') || holding || autoWalk ? 1 : 0) - (keys.has('KeyS') || keys.has('ArrowDown') ? 0.5 : 0);
+  const fwd = (keys.has('KeyW') || keys.has('ArrowUp') || (holding && !backing) || autoWalk ? 1 : 0) - (keys.has('KeyS') || keys.has('ArrowDown') || (holding && backing) ? 0.5 : 0);
   const turn = (keys.has('KeyA') || keys.has('ArrowLeft') ? 1 : 0) - (keys.has('KeyD') || keys.has('ArrowRight') ? 1 : 0);
   look.tYaw += turn * dt * 2.2;
   // held and dragged out sideways: keep turning that way, like a stick
@@ -606,7 +627,7 @@ const sunScreen = new THREE.Vector3();
 const camDir = new THREE.Vector3();
 let focus = 1;
 // dev: tuning handles in the console
-if (import.meta.env.DEV) Object.assign(window, { trees, ferns, props, fungi, fungarium, spores, throwAt, shellMat, lensMat, atmosMat, camera, aoPass, lens, atmos, beautyRT, scene, renderer, composer, world, me, look });
+if (import.meta.env.DEV) Object.assign(window, { trees, ants, ferns, props, fungi, fungarium, spores, throwAt, shellMat, lensMat, atmosMat, camera, aoPass, lens, atmos, beautyRT, scene, renderer, composer, world, me, look });
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.05);
   shellMat.uniforms.uTime.value = clock.elapsedTime;
@@ -618,6 +639,7 @@ renderer.setAnimationLoop(() => {
   props.update(me.x, me.z);
   ferns.update(me.x, me.z);
   trees.update(me.x, me.z);
+  ants.update(dt, me.x, me.z, trees.trunks);
   placeFarFloor(me.x, me.z);
   // the shadow map follows a point ahead of you
   const centre = new THREE.Vector3(me.x + fx * 1.4, me.y, me.z + fz * 1.4);
