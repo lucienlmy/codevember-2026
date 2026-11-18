@@ -145,6 +145,14 @@ pnpm -C 18 dev
   press). Frosted like the card the page opens with: grey glass, no outline, a deep shadow;
   the control's name at that card's size, what it does under it, a little softer. On to
   start with, remembered. (It was a dark box with a border, its name in small caps.)
+- **Keys**, wherever a control has one: drawn as keys, each cap in a fine outline with barely
+  rounded corners, beside the control's name in its tip and beside its row in the menu
+  (`⌘` `S`, `T`, `+` / `−`). The moves of the hand are there the same way, a line each:
+  `Drag ↕` on its ring for an arm's length, `Drag ↔` for its swing, `⌘` `Drag ↕` for its
+  volume, `Drag ↕` on the root for the key, `⇧` `Click` for the sound before, the digits
+  for the ten presets. They were words at the end of a tip's sentence ("Key: S."),
+  which nobody reads to the end of. The `≡` itself has no tip: it opens a list of things
+  that each have their own.
 - (The workbench was a block bottom right with everything in it, then a strip along the
   bottom with one long line of buttons and sliders under the rows. Then a row a link, and a drawer
   for the rest.)
@@ -162,7 +170,8 @@ pnpm -C 18 dev
   nothing, the knobs being right there. A click, or a finger, holds it lit until a click lands outside
   the rings. (First the arm itself had to be hit, then anywhere in the circle round where it
   hangs: both moved with the chain.)
-- **The paths**: behind every joint a short tail, the quarter of a bar it has just drawn,
+- **The paths**: behind every joint a tail, the half of a bar it has just drawn (a quarter
+  at first: gone before the eye had followed it),
   brightest where it has just been and gone by the end of that; the last joint's is the
   brightest. (They were whole closed curves at one brightness first: a picture, but not of
   anything moving. Then a whole bar's, fading: the picture again, only dimmer.)
