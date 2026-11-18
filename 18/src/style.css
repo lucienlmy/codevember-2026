@@ -1,0 +1,377 @@
+/* a dark day: backdrop #0b0b0d, ink #f4f4f2. A light one: a light backdrop, ink #1c1c1c (docs/DESIGN.md) */
+html, body { margin: 0; height: 100%; background: #0b0b0d; overflow: hidden; }
+canvas { display: block; width: 100vw; height: 100vh; }
+
+/* the title plate, top left: the day in Plex capitals, the way home under it */
+.plate {
+  position: fixed; z-index: 2;
+  top: max(24px, env(safe-area-inset-top)); left: max(24px, env(safe-area-inset-left));
+  pointer-events: none; user-select: none; -webkit-user-select: none;
+  color: #f4f4f2;
+  font: 13px/1.4 Inter, "Helvetica Neue", Helvetica, Arial, sans-serif;
+}
+.plate b {
+  display: block; white-space: nowrap;
+  font: 700 56px/0.9 "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  letter-spacing: -0.02em; text-transform: uppercase;
+}
+.plate .head > i {
+  display: block; margin-top: 6px; font-style: normal;
+  font-weight: 600; font-size: 14px; line-height: 1.15; letter-spacing: 0.12em; text-transform: uppercase;
+}
+.plate .home { color: inherit; text-decoration: none; pointer-events: auto; }
+.plate .home span[lang="ja"] { font-family: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Yu Gothic", sans-serif; letter-spacing: 0.06em; }
+@media (max-width: 640px) {
+  .plate { top: max(16px, env(safe-area-inset-top)); left: max(16px, env(safe-area-inset-left)); }
+  .plate b { font-size: 36px; }
+  .plate .head > i { font-size: 10px; }
+}
+/* ?clean: the scene alone */
+.clean .plate { display: none; }
+
+/* under the plate: one line, gone once the sound is up */
+.plate .hint {
+  display: block; margin-top: 14px; font-style: normal;
+  font-weight: 600; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase;
+}
+
+/* what the panel and the bar share: the small caps */
+.ui {
+  color: #f4f4f2;
+  font: 600 10px/1 Inter, "Helvetica Neue", Helvetica, Arial, sans-serif;
+  letter-spacing: 0.12em; text-transform: uppercase;
+  user-select: none; -webkit-user-select: none; touch-action: manipulation;
+}
+
+/* Pills, as on day 07 but in this day's dark: the shapes and the manners of that glass, but black with a white outline (it was frosted glass here too, with a sheen, then one flat grey tone). The glass is a
+   layer behind the pill, not the pill itself, so a list that opens out of it can frost what is
+   under it too. */
+.pill, .voice, .tracks, .arm, .pop, .gauge { position: relative; isolation: isolate; }
+.pill::before, .voice::before, .tracks::before, .pop::before, .gauge::before {
+  content: ""; position: absolute; z-index: -1; inset: 0; border-radius: inherit; pointer-events: none;
+  /* Frosted: the chain swings behind the panels, and shows through as a blur. A hairline round it, half a pixel where the screen has them. */
+  background: rgba(22, 22, 25, 0.55); box-sizing: border-box; border: 0.5px solid rgba(244, 244, 242, 0.2);
+  -webkit-backdrop-filter: blur(16px) saturate(1.6); backdrop-filter: blur(16px) saturate(1.6);
+}
+.pill { border-radius: 999px; }
+/* what stands over the scene to be read: denser, and a shadow under it */
+.pop::before, .gauge::before { background: rgba(22, 22, 25, 0.82); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); }
+
+/* a button in a pill: no border, a soft disc under the pointer, the ink when it is on */
+.ui button {
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px; box-sizing: border-box;
+  height: 26px; min-width: 26px; padding: 0 9px; border: 0; border-radius: 13px; white-space: nowrap;
+  background: none; color: rgba(244, 244, 242, 0.62); font: inherit; letter-spacing: inherit; text-transform: inherit; cursor: pointer;
+}
+.ui button:hover, .ui button.at { color: #f4f4f2; background: rgba(244, 244, 242, 0.09); }
+.ui button[aria-pressed="true"], .ui button[aria-selected="true"] { background: #f4f4f2; color: #0b0b0d; }
+.ui button:disabled { opacity: 0.25; cursor: default; background: none; }
+.ui button:focus-visible, .knob:focus-visible { outline: 1px solid rgba(244, 244, 242, 0.6); outline-offset: 1px; }
+.ui svg { display: block; flex: none; fill: currentColor; }
+.ui svg .s { fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.ui output { text-align: center; font-variant-numeric: tabular-nums; }
+.sep { flex: none; width: 1px; height: 14px; margin: 0 5px; background: rgba(244, 244, 242, 0.14); }
+
+/* Along the bottom, in the middle: the instrument's panel and the tracks' side by side, as tall
+   as each other. Where there is no room for that (.over, main.ts) the instrument's stands on
+   the tracks'. Only the panels take the pointer: beside them it goes through to the scene. */
+.panel {
+  position: fixed; z-index: 2;
+  left: max(24px, env(safe-area-inset-left)); right: max(24px, env(safe-area-inset-right)); bottom: max(24px, env(safe-area-inset-bottom));
+  display: flex; justify-content: center; align-items: stretch; gap: 32px; pointer-events: none; box-sizing: border-box;
+}
+.panel > * { flex: none; pointer-events: auto; max-width: 100%; box-sizing: border-box; }
+.panel.over { flex-direction: column; align-items: center; gap: 6px; }
+/* The tracks' panel is only as tall as its rows: with few of them it is the shorter one, both
+   standing on the same line. (The instrument's still grows to a taller neighbour.) */
+.panel > .tracks { align-self: flex-end; }
+/* The eye in a panel's corner puts it away, down to its name in a pill, and brings it back. */
+.ui .eye { position: absolute; top: 7px; right: 10px; width: 26px; height: 24px; padding: 0; }
+.voice.shut, .tracks.shut {
+  flex-direction: row; align-items: center; align-self: flex-end; justify-content: flex-start;
+  min-width: 150px; padding: 0 44px 0 20px; height: 40px; border-radius: 999px;
+}
+.voice.shut h3, .tracks.shut h3 { align-self: center; margin: 0; font: inherit; font-size: 9px; white-space: nowrap; }
+.shut .eye { top: 8px; right: 8px; }
+
+/* The instrument and the mix: one panel, a row each with a line between, each row in sections
+   under their labels with a line between those too. */
+/* (as tall as the tracks' panel when that is the taller: its rows then spread over the height, the mix at the foot) */
+.voice { display: flex; flex-direction: column; align-items: stretch; justify-content: space-between; padding: 18px 20px 18px; border-radius: 22px; }
+.voice .group + .group { margin-top: 9px; padding-top: 11px; border-top: 1px solid rgba(244, 244, 242, 0.12); }
+.group { display: flex; align-items: stretch; }
+.group section { display: grid; align-content: start; gap: 8px; padding: 0 9px; border-left: 1px solid rgba(244, 244, 242, 0.12); }
+.group section:first-child { padding-left: 0; border-left: 0; }
+.group section:last-child { padding-right: 0; }
+.group h3, .tracks h3 { margin: 0; font: inherit; font-size: 9px; white-space: nowrap; }
+.ctl { display: flex; align-items: flex-start; gap: 2px; }
+/* a list is a pill of its own, so it reads as something to press */
+.ctl { gap: 4px; }
+.ui .ctl > .pick > .cur { padding: 0 9px 0 11px; background: rgba(244, 244, 242, 0.1); color: #f4f4f2; }
+.ui .ctl > .pick > .cur:hover, .ui .ctl > .pick > .cur[aria-expanded="true"] { background: rgba(244, 244, 242, 0.2); }
+.ctl > .knob { margin: 2px 0; }
+/* a knob over its name: tiny, in the middle under it */
+.cell { display: grid; justify-items: center; gap: 5px; min-width: 34px; }
+.cell > .knob { margin-top: 2px; }
+.cell > i, .cols { font-style: normal; font-size: 8px; letter-spacing: 0.06em; white-space: nowrap; }
+.cell > i { font-size: 6.5px; line-height: 7px; letter-spacing: 0.05em; opacity: 0.36; }
+.seg { display: flex; gap: 2px; }
+/* Physics is on: its button is orange, with a warning sign beside it in the same orange */
+.ui .seg button[data-id="physics"][aria-pressed="true"] { background: #ff9500; color: #0b0b0d; }
+/* (the sign alone: the row has no room for words, and the tip says them) */
+.warning { display: flex; align-items: center; height: 26px; margin-left: 4px; color: #ff9500; }
+
+/* a list: what is picked, and pressed, the rest standing over it */
+.pick { position: relative; display: flex; }
+.pick > .cur svg { opacity: 0.6; }
+.pop {
+  position: absolute; z-index: 5; left: 50%; bottom: calc(100% + 12px); transform: translateX(-50%);
+  display: flex; flex-direction: column; gap: 2px; padding: 5px; border-radius: 18px;
+}
+.pop[hidden] { display: none; }
+.pop button { width: 100%; justify-content: flex-start; padding: 0 12px; }
+/* the menu: rows with a switch or a key, hanging under the bar */
+.pop.menu { left: auto; right: -6px; bottom: auto; top: calc(100% + 11px); transform: none; min-width: 188px; }
+.pop hr { width: calc(100% - 20px); margin: 3px auto; border: 0; height: 1px; background: rgba(244, 244, 242, 0.12); }
+.pop .row { height: 30px; gap: 10px; border-radius: 13px; color: #f4f4f2; }
+.row span { flex: 1; text-align: left; }
+.row kbd { font: inherit; letter-spacing: 0.04em; opacity: 0.45; }
+.switch { position: relative; flex: none; width: 24px; height: 14px; border-radius: 999px; background: rgba(244, 244, 242, 0.18); transition: background 0.15s; }
+.switch::after {
+  content: ""; position: absolute; left: 2px; top: 2px; width: 10px; height: 10px; border-radius: 50%; background: #f4f4f2;
+  transition: transform 0.18s cubic-bezier(0.3, 1.4, 0.5, 1), background 0.15s;
+}
+.switch.on { background: #f4f4f2; }
+.switch.on::after { transform: translateX(10px); background: #0b0b0d; }
+
+/* the tracks: one panel of glass under its label, the columns' names, then a row a link */
+/* (the space under the last row is the space over the label: 18px to the plus's ring) */
+.tracks { --pad: 14px; display: flex; flex-direction: column; align-items: stretch; gap: 3px; padding: 18px var(--pad) 13px; border-radius: 22px; }
+.tracks h3 { align-self: flex-start; margin: 0 8px 9px; }
+.cols, .arm { display: grid; grid-template-columns: var(--cols); gap: 4px; align-items: center; justify-items: center; padding: 0 8px; }
+/* the columns' names: as small and as dim as the knobs' in the other panel */
+.cols { height: 10px; font-size: 6.5px; line-height: 7px; letter-spacing: 0.05em; opacity: 0.36; }
+/* a heading never widens its column: the rows under it would stick out of the screen */
+.cols span { min-width: 0; overflow: hidden; justify-self: stretch; text-align: center; }
+.arm { padding: 3px 8px; border-radius: 999px; }
+/* the link the pointer is on, here or on the chain: its row in its colour, from edge to edge of the panel */
+.arm::before { content: ""; position: absolute; z-index: -1; inset: -1px calc(1px - var(--pad)) -2px; pointer-events: none; }
+/* a hairline between one track and the next */
+.arm + .arm::after { content: ""; position: absolute; left: 8px; right: 8px; top: -2px; height: 1px; background: rgba(244, 244, 242, 0.1); pointer-events: none; }
+.arm.hot::before { background: color-mix(in srgb, var(--arm) 22%, transparent); }
+.arm output { color: var(--arm); justify-self: stretch; }
+.arm button { padding: 0; justify-self: stretch; }
+.arm button[aria-pressed="true"] { background: var(--arm); color: #0b0b0d; }
+/* solo and mute: a letter each, in a ring the size of remove's and as fine as a knob's (not white); filled while it is on */
+.ui .arm .ms {
+  justify-self: center; width: 18px; min-width: 18px; height: 18px; padding: 0; border-radius: 50%;
+  border: 1px solid rgba(244, 244, 242, 0.45); color: rgba(244, 244, 242, 0.8); font-size: 8px; letter-spacing: 0; line-height: 1;
+}
+.ui .arm .ms:hover { border-color: #f4f4f2; color: #f4f4f2; background: none; }
+.ui .arm .ms[aria-pressed="true"] { background: var(--arm); border-color: var(--arm); color: #0b0b0d; }
+/* an arm's sound: a drum to press through, or the note where it rests (to read, not to press) */
+.arm .snd { font-size: 9px; letter-spacing: 0.04em; color: var(--arm); }
+.arm .snd:disabled { opacity: 0.55; }
+/* the grip: drag it to move the link along the chain */
+.grip { color: var(--arm); opacity: 0.6; font-size: 12px; letter-spacing: -0.2em; text-align: center; cursor: grab; touch-action: none; line-height: 26px; }
+.grip:hover { opacity: 1; }
+.panel.moving, .panel.moving .grip { cursor: grabbing; }
+/* Add track: the last row, on the rows' own columns: its plus in a ring the size of a knob,
+   under the volume knobs, its name beside it. A hairline over it. Where the panel is taller
+   than its rows (the other one is), it stays at the foot. */
+.ui button.add {
+  position: relative; display: grid; grid-template-columns: var(--cols); gap: 4px; align-items: center; justify-items: center;
+  height: 32px; margin-top: auto; padding: 3px 8px; border-radius: 0;
+}
+.ui button.add:hover { background: none; }
+/* Add track and a track's remove: in the full ink, ring and all */
+.ui button.add, .ui .arm button[data-act="rm"] { color: #f4f4f2; }
+.ui button.add svg .ring, .ui .arm button[data-act="rm"] svg .ring { opacity: 1; }
+/* (the volume knobs are the fourth column) */
+.add svg { grid-column: 4; }
+.add span { grid-column: 5 / -1; justify-self: start; padding-left: 4px; }
+.arm + .add::after { content: ""; position: absolute; left: 8px; right: 8px; top: -2px; height: 1px; background: rgba(244, 244, 242, 0.1); pointer-events: none; }
+.ui svg .s.ring { stroke-width: 1; opacity: 0.6; }
+.ui button:hover svg .ring { opacity: 1; }
+/* and a track's remove: a minus in the same ring, no disc behind it */
+.arm button[data-act="rm"]:hover { background: none; }
+
+/* A knob: a ring and a hand, from seven o'clock round to five. Pressed and dragged it turns,
+   and it is lit while it is held (its gauge is over it then). */
+.knob {
+  position: relative; display: block; box-sizing: border-box; width: 22px; height: 22px;
+  border: 1px solid rgba(244, 244, 242, 0.45); border-radius: 50%;
+  cursor: ns-resize; touch-action: none; outline: none;
+}
+.knob::after {
+  content: ""; position: absolute; left: 50%; top: 5%; width: 2px; height: 40%; margin-left: -1px; border-radius: 1px;
+  background: var(--arm, #f4f4f2); transform-origin: 50% 112.5%; transform: rotate(var(--turn, 0deg));
+}
+/* Three dots round it, two pixels outside the ring: where its way starts, its middle, where it
+   ends. One dot at the top and its two shadows, a turn of 135 degrees to either side (--far is
+   from the knob's centre to a dot's: half the knob, the two pixels, half the dot). */
+.knob::before {
+  content: ""; position: absolute; left: 50%; top: -5px; width: 2px; height: 2px; margin-left: -1px; border-radius: 50%;
+  --far: 14px; --dot: rgba(244, 244, 242, 0.5);
+  background: var(--dot);
+  box-shadow: calc(var(--far) * -0.7071) calc(var(--far) * 1.7071) 0 0 var(--dot), calc(var(--far) * 0.7071) calc(var(--far) * 1.7071) 0 0 var(--dot);
+}
+.knob.num::before { display: none; }
+.knob:hover, .knob:focus { border-color: #f4f4f2; }
+.knob.on { background: var(--arm, #f4f4f2); border-color: var(--arm, #f4f4f2); }
+.knob.on::after { background: #0b0b0d; }
+/* a knob that is its number: the tempo */
+.knob.num {
+  display: flex; align-items: center; justify-content: center; width: auto; min-width: 36px; height: 26px; padding: 0 6px;
+  border: 0; border-radius: 13px; color: rgba(244, 244, 242, 0.62); font-variant-numeric: tabular-nums; letter-spacing: 0.04em;
+}
+.knob.num::after { display: none; }
+.knob.num:hover { color: #f4f4f2; background: rgba(244, 244, 242, 0.09); }
+.knob.num.on { color: #0b0b0d; background: #f4f4f2; }
+
+/* The gauge: a tall pill over the knob that is held, filled as far as the knob is turned, its
+   number at the foot. It grows out of its knob. Left open by a click, it is dragged on. */
+.gauge {
+  position: fixed; z-index: 6; padding: 5px; border-radius: 999px; pointer-events: none;
+  opacity: 0; transform: translate(-50%, calc(-100% + 6px)) scale(0.96); transform-origin: 50% 100%;
+  transition: opacity 0.16s ease-out, transform 0.2s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.gauge.below { transform: translate(-50%, -6px) scale(0.96); transform-origin: 50% 0; }
+.gauge.open { opacity: 1; transform: translate(-50%, -100%) scale(1); }
+.gauge.below.open { transform: translate(-50%, 0) scale(1); }
+.gauge .track { position: relative; width: 32px; height: 140px; border-radius: 999px; overflow: hidden; background: rgba(244, 244, 242, 0.1); }
+.gauge .fill { position: absolute; left: 0; right: 0; bottom: 0; height: calc(18px + var(--t, 0) * (100% - 18px)); border-radius: 999px; background: var(--arm, #f4f4f2); }
+.gauge b {
+  position: absolute; left: 0; right: 0; bottom: 5px; text-align: center; color: #0b0b0d;
+  font: 600 9px/1 Inter, "Helvetica Neue", Helvetica, Arial, sans-serif; font-variant-numeric: tabular-nums;
+}
+.gauge.pinned { pointer-events: auto; }
+.gauge.pinned .track { cursor: ns-resize; touch-action: none; }
+
+/* the bar, top right: the transport in icons, the tempo as its number, and the menu */
+.bar {
+  position: fixed; z-index: 3;
+  top: max(24px, env(safe-area-inset-top)); right: max(24px, env(safe-area-inset-right));
+  display: flex; align-items: center; gap: 2px; padding: 3px 6px;
+}
+.bar button { padding: 0; }
+/* a size up from the panels' controls: it is the transport, alone in its corner */
+.bar { gap: 3px; padding: 4px 8px; }
+.ui .bar > button, .ui .bar > .pick > .cur { width: 34px; min-width: 34px; height: 34px; border-radius: 17px; }
+.bar > button svg, .bar > .pick > .cur svg { width: 18px; height: 18px; }
+.bar > .knob.num { height: 34px; min-width: 46px; border-radius: 17px; font-size: 12px; }
+.bar > .sep { height: 18px; margin: 0 6px; }
+
+.bar .pop button { padding: 0 10px 0 12px; }
+
+@media (max-width: 760px) {
+  .panel { left: max(16px, env(safe-area-inset-left)); right: max(16px, env(safe-area-inset-right)); bottom: max(16px, env(safe-area-inset-bottom)); }
+  .panel.over { align-items: stretch; }
+  .tracks { --pad: 10px; padding-top: 16px; }
+  .cols, .arm, .ui button.add { box-sizing: border-box; grid-template-columns: var(--cols-phone); }
+  /* no room for an arm's sound on a phone: it keeps the one it has */
+  .arm .snd, .cols .snd { display: none; }
+  .cols { letter-spacing: 0.02em; }
+  .cell { min-width: 32px; }
+  .voice { padding: 16px 16px 14px; }
+  .group section { padding: 0 8px; }
+  /* the instruments and the scale do not fit one line: the scale goes under them */
+  .voice .group:first-child { flex-direction: column; gap: 10px; }
+  .voice .group:first-child section { padding: 0; border: 0; }
+  /* and the rows under them only just do: the words a little closer */
+  .group h3 { letter-spacing: 0.08em; }
+  .ui .seg button { padding: 0 7px; letter-spacing: 0.08em; }
+  .group h3 { font-size: 8px; }
+  .arm .knob { width: 100%; max-width: 24px; height: auto; aspect-ratio: 1; }
+  .arm .knob::before { --far: 15px; }
+  .bar { top: max(16px, env(safe-area-inset-top)); right: max(16px, env(safe-area-inset-right)); }
+}
+.clean .panel, .clean .bar, .clean .gauge { display: none; }
+
+/* The tip: what the control under the pointer does, in a card of its own over the panels.
+   Frosted like the card the page opens with: grey glass, no outline, a deep shadow. Its name
+   the size of that card's line, what it does under it, a little softer, with room to read. */
+.tip {
+  position: fixed; z-index: 3; pointer-events: none;
+  /* over the panel its control is in (main.ts puts it there and says how wide) */
+  width: 320px; max-width: calc(100vw - 48px); box-sizing: border-box;
+  padding: 17px 22px 19px; border-radius: 26px;
+  background: rgba(58, 58, 60, 0.3);
+  -webkit-backdrop-filter: blur(12px) saturate(1.8); backdrop-filter: blur(12px) saturate(1.8);
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+  color: #f4f4f2; font: 400 13px/1.55 Inter, "Helvetica Neue", Helvetica, Arial, sans-serif;
+}
+@supports (corner-shape: squircle) { .tip { corner-shape: squircle; border-radius: 40px; } }
+.tip[hidden] { display: none; }
+.tip b { display: block; margin-bottom: 5px; font-weight: 600; font-size: 15px; line-height: 1.25; letter-spacing: -0.01em; }
+.tip span { color: rgba(244, 244, 242, 0.8); }
+@media (max-width: 760px) {
+  .tip { top: calc(max(16px, env(safe-area-inset-top)) + 116px); left: max(16px, env(safe-area-inset-left)); right: max(16px, env(safe-area-inset-right)); width: auto; max-width: none; }
+}
+.clean .tip { display: none; }
+
+/* First, as on day 14: a frosted square in the middle, headphones recommended; a click and it goes. */
+.veil {
+  position: fixed; inset: 0; z-index: 7; display: grid; place-items: center; cursor: pointer;
+  transition: opacity 0.45s ease-out;
+}
+.veil .card {
+  position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+  width: 240px; height: 240px; border-radius: 36px; box-sizing: border-box; padding: 24px;
+  color: #f4f4f2; text-align: center; font-family: Inter, "Helvetica Neue", Helvetica, Arial, sans-serif;
+  background: rgba(58, 58, 60, 0.2);
+  -webkit-backdrop-filter: blur(6px) saturate(1.8); backdrop-filter: blur(6px) saturate(1.8);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+  animation: card-in 0.7s 0.25s cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
+  transition: transform 0.45s cubic-bezier(0.4, 0, 0.2, 1);
+}
+/* Apple's continuous corners where the browser has them (a squircle needs a larger radius to read as round as a circle's) */
+@supports (corner-shape: squircle) { .veil .card { corner-shape: squircle; border-radius: 56px; } }
+.veil .card > svg { margin-bottom: 4px; opacity: 0.95; }
+/* the x tucked into the corner, close to its curve */
+.veil .x {
+  position: absolute; top: 12px; right: 12px; display: grid; place-items: center;
+  width: 36px; height: 36px; padding: 0; border: 0; border-radius: 50%; cursor: pointer;
+  background: rgba(255, 255, 255, 0.12); color: rgba(244, 244, 242, 0.75);
+  transition: background 0.2s, color 0.2s;
+}
+.veil .x:hover { background: rgba(255, 255, 255, 0.2); color: #f4f4f2; }
+.veil .card b { font-weight: 600; font-size: 15px; letter-spacing: -0.01em; }
+.veil .card i {
+  font-style: normal; font-size: 12px; letter-spacing: 0.08em; opacity: 0.55;
+  font-family: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Yu Gothic", sans-serif;
+}
+.veil.gone { opacity: 0; pointer-events: none; }
+.veil.gone .card { transform: scale(0.94); }
+@keyframes card-in { from { opacity: 0; transform: translateY(10px) scale(0.96); } }
+
+/* a sheet in the middle: a name being asked for (cmd+shift+S), or everything saved (cmd+O) */
+.sheet {
+  position: fixed; z-index: 4; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: min(360px, calc(100vw - 32px)); max-height: 70vh; overflow: auto; box-sizing: border-box;
+  padding: 14px; border: 1px solid rgba(244, 244, 242, 0.35); border-radius: 10px;
+  background: rgba(11, 11, 13, 0.82); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+  color: #f4f4f2; font: 400 13px/1.4 Inter, "Helvetica Neue", Helvetica, Arial, sans-serif;
+}
+.sheet[hidden] { display: none; }
+.sheet b, .sheet i, .sheet .open span { font-style: normal; font-weight: 600; font-size: 10px; line-height: 1; letter-spacing: 0.12em; text-transform: uppercase; }
+.sheet b { display: block; margin-bottom: 10px; }
+.sheet i { display: block; margin-top: 12px; opacity: 0.5; }
+.sheet input {
+  display: block; width: 100%; box-sizing: border-box; padding: 4px 0 6px; border: 0; border-bottom: 1px solid rgba(244, 244, 242, 0.5); border-radius: 0;
+  background: none; color: inherit; font: 400 18px/1.3 Inter, "Helvetica Neue", Helvetica, Arial, sans-serif; outline: none;
+}
+.sheet .saved { display: flex; align-items: center; gap: 6px; }
+.sheet .open {
+  flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 10px; padding: 8px; border: 0; border-radius: 6px;
+  background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; outline: none;
+}
+.sheet .open span { margin-left: auto; opacity: 0.5; white-space: nowrap; }
+.sheet .open:hover, .sheet .open:focus { background: rgba(244, 244, 242, 0.12); }
+.sheet .open[aria-current]::before { content: "●"; font-size: 8px; align-self: center; }
+.sheet .del {
+  flex: none; width: 22px; height: 22px; padding: 0; border: 1px solid rgba(244, 244, 242, 0.35); border-radius: 50%;
+  background: none; color: inherit; font: 600 10px/1 Inter, "Helvetica Neue", Helvetica, Arial, sans-serif; cursor: pointer;
+}
+.sheet .del:hover, .sheet .del:focus { border-color: #f4f4f2; outline: none; }
+.clean .sheet { display: none; }
