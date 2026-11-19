@@ -1,0 +1,22 @@
+{
+  "name": "day-19",
+  "private": true,
+  "description": "A cube of layered sandstone with a lake on it and bones in it, worn voxel by voxel: rain, a hose, wind and a scratch, and what grows after",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-basic-ssl": "^2.3.0",
+    "@webgpu/types": "^0.1.74",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1"
+  },
+  "codevember": {
+    "day": 19,
+    "word": "Erosion",
+    "date": "2026-11-19"
+  }
+}
