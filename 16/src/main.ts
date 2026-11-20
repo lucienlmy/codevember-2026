@@ -15,6 +15,7 @@ import { Trees, trunkFoot, trunkRadius, type Trunk } from './trees';
 import { makeDewMaterial } from './dew';
 import { makeAtmosPass, makeLensPass } from './post';
 import { Fungi, type FungusKind } from './fungi';
+import { loadModels } from './models';
 import { Spores } from './spores';
 import { Dust } from './dust';
 import { Slingshot } from './slingshot';
@@ -270,8 +271,10 @@ const atmosMat = makeAtmosPass(beautyRT.depthTexture!, coarse);
 atmosMat.uniforms.cameraNear.value = camera.near;
 atmosMat.uniforms.uSunDir.value = lightDir;
 // thick forest air: a worm cannot see far anyway
-atmosMat.uniforms.uFog.value = 0.22; // the air: trunks fade out a few steps away, into the colour of the sky
-atmosMat.uniforms.uMist.value = 0.9; // and a mist lying on the moss, glowing towards the sun
+// the air: light, so the trunks stand in layers a long way back, paler and paler, the sun coming through between
+// them (it was thick and golden, 0.22 and 0.9: past two metres everything melted into one yellow wall)
+atmosMat.uniforms.uFog.value = 0.06;
+atmosMat.uniforms.uMist.value = 0.3; // and a mist lying on the moss, glowing towards the sun
 const atmos = new ShaderPass(atmosMat);
 composer.addPass(atmos);
 // spore smoke into the finished, hazy image: its own lighter haze keeps a column visible from far off
@@ -472,6 +475,7 @@ const fungarium = new Fungarium((kind) => { throwKind = kind; pouch.pick(kind, f
 const pouch = new Pouch((kind) => { throwKind = kind; fungarium.select(kind); }, plantAt, () => fungarium.isOpen, () => { keys.clear(); fungarium.toggle(); });
 // the specimens are drawn once things have settled, on the fungarium's own little renderer
 setTimeout(() => pouch.setThumbs(fungarium.drawThumbs()), 1500);
+fungarium.onThumbs = () => pouch.setThumbs(fungarium.thumbs);
 /** Shift and a number: that species' specimen pushes up where you aim (the middle of the screen without a mouse). */
 function plantAt(s: Species) {
   const hit = aimAt(0.45);
@@ -721,6 +725,49 @@ const camDir = new THREE.Vector3();
 let focus = 1;
 // dev: tuning handles in the console
 if (import.meta.env.DEV) Object.assign(window, { sound, forest, trees, ants, ferns, props, fungi, fungarium, spores, throwAt, shellMat, lensMat, atmosMat, camera, aoPass, lens, atmos, beautyRT, scene, renderer, composer, world, me, look });
+// loading (as day 12's ink drawing): the splash, a card in the middle, over the forest drawn as a golden wire mesh
+// (everything in its plain geometry, the moss's shells one sheet). Once the models are in and the picture's
+// shaders compiled, and the card has been up two seconds and a half, the card goes and the picture fades in over
+// the mesh's last frame. A tap on the card lets you in at once.
+const splash = document.querySelector<HTMLElement>('.splash');
+let loading = !!splash && !document.body.classList.contains('clean');
+let revealNow = false;
+const wireMat = new THREE.MeshBasicMaterial({ color: 0xe0b56c, wireframe: true, transparent: true, opacity: 0.08, depthWrite: true });
+const WIRE_BG = new THREE.Color(0x120e08);
+// (the mesh goes into the dark with distance, so it has depth)
+const wireFog = new THREE.Fog(WIRE_BG, 0.4, 9);
+if (!loading) { document.body.classList.remove('loading'); splash?.remove(); }
+else {
+  const shown = performance.now();
+  splash!.addEventListener('pointerdown', (e) => { e.stopPropagation(); revealNow = true; });
+  Promise.all([loadModels(), renderer.compileAsync(scene, camera).catch(() => {})])
+    .then(() => setTimeout(() => { revealNow = true; }, Math.max(0, 2500 - (performance.now() - shown))));
+}
+/** the mesh drawn instead of the picture; on the last one, kept in a canvas over the page and faded out */
+function drawWire() {
+  scene.overrideMaterial = wireMat;
+  scene.fog = wireFog;
+  renderer.setClearColor(WIRE_BG);
+  renderer.setRenderTarget(null);
+  renderer.render(scene, camera);
+  scene.overrideMaterial = null;
+  scene.fog = null;
+  renderer.setClearColor(BG);
+  if (!revealNow) return;
+  const snap = document.createElement('canvas');
+  snap.className = 'wiresnap';
+  snap.width = canvas.width; snap.height = canvas.height;
+  snap.getContext('2d')!.drawImage(canvas, 0, 0); // (now, before the frame is handed on: no preserved buffer needed)
+  document.body.append(snap);
+  loading = false;
+  document.body.classList.remove('loading');
+  splash!.classList.add('gone');
+  setTimeout(() => splash!.remove(), 1000);
+  // the picture's first frames underneath first, then the mesh fades off them
+  requestAnimationFrame(() => requestAnimationFrame(() => snap.classList.add('gone')));
+  setTimeout(() => snap.remove(), 2000);
+}
+
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.05);
   shellMat.uniforms.uTime.value = clock.elapsedTime;
@@ -773,6 +820,7 @@ renderer.setAnimationLoop(() => {
   atmosMat.uniforms.uSunUv.value.set(sunScreen.x * 0.5 + 0.5, sunScreen.y * 0.5 + 0.5);
   atmosMat.uniforms.uSunOn.value = THREE.MathUtils.smoothstep(camera.getWorldDirection(camDir).dot(lightDir), 0.0, 0.5);
   atmosMat.uniforms.uAspect.value = camera.aspect;
+  if (loading) { drawWire(); forest.update(dt); return; }
   renderer.setRenderTarget(beautyRT);
   renderer.render(scene, camera);
   renderer.setRenderTarget(null);
