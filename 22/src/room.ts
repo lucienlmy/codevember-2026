@@ -58,7 +58,7 @@ export function buildSwedishRoom(): THREE.Group {
     }),
   );
   driveShadow.rotation.x = -Math.PI / 2;
-  driveShadow.position.set(3.05, 0.004, 0.24);
+  driveShadow.position.set(3.05, 0.004, -0.82);
   driveShadow.rotation.z = 0.18;
   room.add(driveShadow);
 
@@ -329,7 +329,6 @@ function makeDeskTextures(): {
     rCtx.strokeStyle = `rgba(205, 205, 205, ${(alpha * 2.2).toFixed(3)})`;
     rCtx.lineWidth = width + 0.4;
     rCtx.beginPath();
-    cCtx.moveTo(x0, y0);
     rCtx.moveTo(x0, y0);
     rCtx.quadraticCurveTo(cx, cy, x1, y1);
     rCtx.stroke();
