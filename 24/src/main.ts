@@ -119,6 +119,7 @@ const contact = (() => {
 })();
 
 // --- ground: dark slate, fading into the night ------------------------------------
+let ground!: THREE.Mesh;
 {
   const size = 512;
   const cv = document.createElement('canvas');
@@ -153,7 +154,7 @@ const contact = (() => {
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
   tex.repeat.set(6, 6);
   tex.anisotropy = 8;
-  const ground = new THREE.Mesh(
+  ground = new THREE.Mesh(
     new THREE.PlaneGeometry(8, 8),
     new THREE.MeshStandardMaterial({ map: tex, roughness: 0.92, metalness: 0, bumpMap: tex, bumpScale: 0.6 }),
   );
@@ -203,31 +204,37 @@ const bodies: Body[] = snakes.map((s, k) => {
 });
 const heads: (Head | null)[] = snakes.map(() => null);
 
-// two heads modelled, a python's and a colubrid's; each species' own colours painted on its family's
+// two heads modelled, a python's and a colubrid's; each species' own colours painted on its family's.
+// Made as they come, but put on only once their shaders are built (see loading, below)
 const loader = new GLTFLoader();
 const texLoader = new THREE.TextureLoader();
 const base = import.meta.env.BASE_URL;
-(['python', 'corn'] as const).forEach((shape) => {
-  loader.load(`${base}${shape}.glb`, (gltf) => {
-    snakes.forEach((s, k) => {
-      if (s.sp.shape !== shape) return;
-      const put = (paint?: THREE.Texture) => {
-        const h = createHead(gltf, s.sp, paint);
-        h.group.scale.setScalar(kinds[k].f);
-        heads[k] = h;
-        scene.add(h.group);
-      };
-      if (s.sp.name === shape) return put();
-      texLoader.load(`${base}heads/${s.sp.name}.jpg`, (tex) => {
+const headsMade = Promise.all((['python', 'corn'] as const).map((shape) => loader.loadAsync(`${base}${shape}.glb`).then((gltf) =>
+  Promise.all(snakes.map(async (s, k) => {
+    if (s.sp.shape !== shape) return;
+    let paint: THREE.Texture | undefined;
+    if (s.sp.name !== shape) {
+      paint = await texLoader.loadAsync(`${base}heads/${s.sp.name}.jpg`).catch(() => undefined);
+      if (paint) {
         // as glTF has its textures: not flipped, sRGB, sharp at a glance
-        tex.flipY = false;
-        tex.colorSpace = THREE.SRGBColorSpace;
-        tex.anisotropy = 8;
-        put(tex);
-      }, undefined, () => put());
-    });
-  });
-});
+        paint.flipY = false;
+        paint.colorSpace = THREE.SRGBColorSpace;
+        paint.anisotropy = 8;
+      }
+    }
+    const h = createHead(gltf, s.sp, paint);
+    h.group.scale.setScalar(kinds[k].f);
+    heads[k] = h;
+    // into the scene as it comes: in the drawing at once (the picture isn't drawn till it's built)
+    scene.add(h.group);
+    // the neck takes the head's colours (skin.ts)
+    if (h.paint) {
+      const u = skins[k].userData.uniforms;
+      u.tHead.value = h.paint;
+      u.uHeadOn.value = 1;
+    }
+  })),
+).catch(() => { /* no heads then: the bodies alone */ })));
 
 // --- touch -------------------------------------------------------------------------------
 // tap a snake and its scales play; hold it and it gets away along its track, the longer the faster
@@ -435,12 +442,94 @@ function frame(ts: number) {
   camera.position.add(shake.pos.applyQuaternion(camera.quaternion));
   camera.quaternion.multiply(qShake.setFromEuler(shake.rot));
   camera.updateMatrixWorld();
-  post.render(scene, camera, focus, time);
+  // the drawing until the picture is built, then the picture fades in over it (loading, below)
+  if (revealing && reveal < 1) reveal = Math.min(1, reveal + dt / REVEAL);
+  post.render(scene, camera, focus, time, THREE.MathUtils.smoothstep(reveal, 0, 1), reveal < 1 ? drawWire : null);
   camera.position.copy(keep.pos);
   camera.quaternion.copy(keep.quat);
   camera.updateMatrixWorld();
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
+
+// --- loading -------------------------------------------------------------------------------
+// The knot shows at once as a drawing, its wireframe in the ink of the title, and moves and can be
+// touched, while the real shaders are built off the thread, the heads come in (into the drawing as
+// they do) and the textures go up, one a frame. Then the picture fades in over the drawing, as day
+// 12's does, with nothing left for its first frames to build.
+const REVEAL = 1.6; // seconds
+let reveal = 0;
+let revealing = false;
+const wireMat = new THREE.MeshBasicMaterial({ color: 0xffffff, wireframe: true });
+// lines are never culled: the far side of every body would show through. So the bodies go into the
+// depth first, a hair further back than they are, and only the lines in front of them get drawn
+const hideMat = new THREE.MeshBasicMaterial({ colorWrite: false, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 });
+// the drawing: the bodies, not the ground, not the heads (their mesh is so fine it draws solid: they
+// come in with the picture)
+function drawWire() {
+  const g = ground.visible;
+  ground.visible = false;
+  for (const h of heads) if (h) h.group.visible = false;
+  renderer.shadowMap.autoUpdate = false;
+  scene.overrideMaterial = hideMat;
+  renderer.render(scene, camera);
+  const ac = renderer.autoClear;
+  renderer.autoClear = false;
+  scene.overrideMaterial = wireMat;
+  renderer.render(scene, camera);
+  renderer.autoClear = ac;
+  scene.overrideMaterial = null;
+  renderer.shadowMap.autoUpdate = true;
+  for (const h of heads) if (h) h.group.visible = true;
+  ground.visible = g;
+}
+const nextFrame = () => new Promise((r) => requestAnimationFrame(r));
+async function load() {
+  // two frames of the drawing first: where the browser can't build off the thread, the page stands
+  // still on it, not on black
+  await nextFrame();
+  await nextFrame();
+  // ?loader: held on the drawing, for looking at it
+  if (query.has('loader')) return;
+  await headsMade;
+  try {
+    await post.compile(scene, camera, scene);
+    await nextFrame();
+    // three asks the GPU about a program the first time it draws with it, a round trip that waits on
+    // the frame in flight: ask now. And every texture uploaded, one a frame
+    const materials = new Set<THREE.Material>();
+    scene.traverse((o) => {
+      const m = (o as THREE.Mesh).material;
+      if (m) for (const x of [m].flat()) materials.add(x);
+    });
+    const textures = new Set<THREE.Texture>();
+    for (const m of materials) {
+      (renderer.properties.get(m) as { programs?: Map<string, { getUniforms(): unknown }> }).programs?.forEach((p) => p.getUniforms());
+      for (const v of Object.values(m)) if (v instanceof THREE.Texture) textures.add(v);
+      for (const u of Object.values((m.userData.uniforms ?? {}) as Record<string, { value: unknown }>)) if (u.value instanceof THREE.Texture) textures.add(u.value);
+    }
+    for (const t of textures) {
+      await nextFrame();
+      renderer.initTexture(t);
+    }
+    // built isn't finished: the driver makes the rest of a program on its first draw (Metal its
+    // pipelines), a third of a second at once if left to the reveal. So each part is drawn once,
+    // alone, into the picture's own target, unseen, one a frame
+    const parts: THREE.Object3D[] = [...bodies.map((b) => b.mesh), ground, ...heads.flatMap((h) => (h ? [h.group] : []))];
+    for (const p of parts) {
+      await nextFrame();
+      const was = parts.map((q) => q.visible);
+      parts.forEach((q) => (q.visible = q === p));
+      post.drawScene(scene, camera);
+      parts.forEach((q, i) => (q.visible = was[i]));
+    }
+    await nextFrame();
+  } catch {
+    /* built on the first frame then */
+  }
+  revealing = true;
+  document.body.classList.remove('loading');
+}
+void load();
 
 Object.assign(window, { __snakes: { SCARE, LOOK, PERIOD, skins, world, snakes, tracks, camera, controls, bodies, renderer, scene, contact } });
