@@ -1,0 +1,28 @@
+{
+  "name": "day-02",
+  "private": true,
+  "description": "WebGPU Diamond Cutter game: slice rising colored gemstones in 3D across 1,000 deterministic levels, dodge obsidian Black Diamonds, and watch severed halves shatter into refractive shards over dispersive floor caustics",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@types/d3-delaunay": "^6.0.4",
+    "@vitejs/plugin-basic-ssl": "^2.3.0",
+    "@webgpu/types": "^0.1.74",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1"
+  },
+  "codevember": {
+    "day": 2,
+    "word": "Shatter",
+    "date": "2026-11-02"
+  },
+  "dependencies": {
+    "@dimforge/rapier3d-compat": "^0.21.0",
+    "d3-delaunay": "^6.0.6",
+    "earcut": "^3.2.4"
+  }
+}

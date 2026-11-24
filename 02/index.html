@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#f4f3f0" />
+    <title>02 · Shatter · Codevember 2026</title>
+    <meta name="author" content="Theo Tillberg (@theo_t)" />
+    <meta name="description" content="WebGPU Diamond Cutter game: slice rising colored gemstones in 3D across 1,000 deterministic levels, dodge obsidian Black Diamonds, and watch severed halves shatter into refractive shards over dispersive floor caustics" />
+    <meta property="og:title" content="02 · Shatter · Codevember 2026" />
+    <meta property="og:description" content="WebGPU Diamond Cutter game: slice rising colored gemstones in 3D across 1,000 deterministic levels, dodge obsidian Black Diamonds, and watch severed halves shatter into refractive shards over dispersive floor caustics" />
+    <meta property="og:image" content="https://ttillberg.github.io/codevember-2026/02/screengrab.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@700&family=Inter:wght@400;600&display=swap" rel="stylesheet" />
+  </head>
+  <body>
+    <canvas id="c"></canvas>
+    <canvas id="trail"></canvas>
+
+    <div class="plate">
+      <div class="head">
+        <b>02 Shatter</b>
+        <i><a class="home" href="https://ttillberg.github.io/codevember-2026/">Codevember 2026 <span lang="ja">砕ける</span></a> · <a class="home" href="https://x.com/theo_t">@theo_t</a></i>
+      </div>
+    </div>
+
+    <div id="hud" class="hud" aria-live="polite">
+      <div class="hud-corner hud-left">
+        <span class="hud-meta">LEVEL</span>
+        <strong id="hud-level">1</strong>
+      </div>
+      <div class="hud-corner hud-right">
+        <span class="hud-meta">BEST <b id="hud-best">0</b></span>
+        <strong id="hud-score">0</strong>
+      </div>
+    </div>
+
+    <button id="banner" class="banner" hidden aria-label="Replay">
+      <span class="banner-title">REPLAY</span>
+      <span class="banner-jp" lang="ja">もう一度</span>
+    </button>
+
+    <div class="top-right" aria-label="Controls">
+      <button id="sound" class="icon-btn" title="Sound (M)" aria-label="Sound">
+        <svg viewBox="0 0 24 24">
+          <path d="M4 10v4h3l5 4V6L7 10H4z" />
+          <path class="on" d="M16 9a4 4 0 0 1 0 6M18.5 6.5a8 8 0 0 1 0 11" />
+          <path class="x" d="M16 9l5 6M21 9l-5 6" />
+        </svg>
+      </button>
+      <button id="pause" class="icon-btn" title="Pause (P)" aria-label="Pause" aria-pressed="false">
+        <svg viewBox="0 0 24 24">
+          <path class="bars" d="M9 6.5v11M15 6.5v11" />
+          <path class="play" d="M8.5 6.5l9 5.5-9 5.5z" fill="currentColor" stroke="none" />
+        </svg>
+      </button>
+    </div>
+
+    <div id="fatal" class="fatal" hidden></div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
