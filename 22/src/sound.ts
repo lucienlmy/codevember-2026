@@ -4,8 +4,17 @@ export class MonitorSound {
   private ctx: AudioContext | null = null;
   private noiseBuf: AudioBuffer | null = null;
   private humGain: GainNode | null = null;
-  private sidOsc: OscillatorNode | null = null;
-  private sidGain: GainNode | null = null;
+  private sidVoices: ({
+    osc: OscillatorNode;
+    filter: BiquadFilterNode;
+    gain: GainNode;
+    routedToGlobalFilter: boolean;
+    lastPwBucket: number;
+  } | null)[] = [null, null, null];
+  private sidBus: GainNode | null = null;
+  private sidGlobalFilter: BiquadFilterNode | null = null;
+  private sidEchoWet: GainNode | null = null;
+  private sidPulseWaves: PeriodicWave[] | null = null;
   private sidRegs = new Uint8Array(25);
 
   enabled = true;
@@ -66,10 +75,13 @@ export class MonitorSound {
       this.humGain.gain.cancelScheduledValues(now);
       this.humGain.gain.setTargetAtTime(on && this.powered ? 0.008 : 0, now, 0.04);
     }
-    if (!on && this.sidGain && this.ctx) {
+    if (!on && this.ctx) {
       const now = this.ctx.currentTime;
-      this.sidGain.gain.cancelScheduledValues(now);
-      this.sidGain.gain.setTargetAtTime(0, now, 0.02);
+      for (const v of this.sidVoices) {
+        if (!v) continue;
+        v.gain.gain.cancelScheduledValues(now);
+        v.gain.gain.setTargetAtTime(0, now, 0.02);
+      }
     }
     if (this.ctx) {
       if (!on && this.ctx.state === 'running') {
@@ -162,9 +174,7 @@ export class MonitorSound {
       if (this.humGain) {
         this.humGain.gain.setTargetAtTime(0, now, 0.04);
       }
-      if (this.sidGain) {
-        this.sidGain.gain.setTargetAtTime(0, now, 0.02);
-      }
+      this.silenceSid();
     }
   }
 
@@ -411,75 +421,266 @@ export class MonitorSound {
     }
   }
 
+  /** Silence all 3 SID voices cleanly (on reset, RUN/STOP, or mute). */
   silenceSid() {
-    if (this.sidGain && this.ctx) {
+    if (this.ctx) {
       const now = this.ctx.currentTime;
-      this.sidGain.gain.cancelScheduledValues(now);
-      this.sidGain.gain.setTargetAtTime(0, now, 0.02);
+      for (const v of this.sidVoices) {
+        if (!v) continue;
+        v.gain.gain.cancelScheduledValues(now);
+        v.gain.gain.setTargetAtTime(0, now, 0.015);
+      }
+      if (this.sidEchoWet) {
+        this.sidEchoWet.gain.cancelScheduledValues(now);
+        this.sidEchoWet.gain.setTargetAtTime(0, now, 0.03);
+      }
     }
     this.sidRegs[4] &= ~0x01;
+    this.sidRegs[11] &= ~0x01;
+    this.sidRegs[18] &= ~0x01;
   }
 
-  /** SID Voice 1 synthesizer for POKE 54272..54296 with authentic ADSR decay. */
+  private ensureSidBus(ctx: AudioContext): GainNode {
+    if (!this.sidBus) {
+      const bus = ctx.createGain();
+      bus.gain.value = 1.0;
+      bus.connect(ctx.destination);
+
+      // Warm analog tape-echo send (classic 1984 nostalgic space + Day 22 Echo motif)
+      const delay = ctx.createDelay(0.6);
+      delay.delayTime.value = 0.27;
+      const lp = ctx.createBiquadFilter();
+      lp.type = 'lowpass';
+      lp.frequency.value = 1450;
+      const fb = ctx.createGain();
+      fb.gain.value = 0.34;
+      const wet = ctx.createGain();
+      wet.gain.value = 0.28;
+
+      bus.connect(delay);
+      delay.connect(lp);
+      lp.connect(fb);
+      fb.connect(delay);
+      lp.connect(wet);
+      wet.connect(ctx.destination);
+
+      this.sidBus = bus;
+      this.sidEchoWet = wet;
+
+      // Programmable global MOS 6581 resonant filter ($D415-$D417, $D418 bits 4-6)
+      const gf = ctx.createBiquadFilter();
+      gf.type = 'lowpass';
+      gf.frequency.value = 2400;
+      gf.Q.value = 1.4;
+      gf.connect(bus);
+      this.sidGlobalFilter = gf;
+    }
+    return this.sidBus;
+  }
+
+  /** Build cached Fourier PeriodicWaves for 16 SID variable pulse-width duty cycles (6%..50%). */
+  private getSidPulseWave(ctx: AudioContext, duty: number): PeriodicWave {
+    if (!this.sidPulseWaves) {
+      this.sidPulseWaves = [];
+      const harmonics = 32;
+      for (let b = 0; b < 16; b++) {
+        const d = 0.06 + (b / 15) * 0.44;
+        const real = new Float32Array(harmonics + 1);
+        const imag = new Float32Array(harmonics + 1);
+        for (let n = 1; n <= harmonics; n++) {
+          // Exact Fourier pulse wave: (2 / (n*pi)) * sin(n*pi*d)
+          imag[n] = (2 / (n * Math.PI)) * Math.sin(n * Math.PI * d);
+        }
+        this.sidPulseWaves.push(ctx.createPeriodicWave(real, imag));
+      }
+    }
+    const sym = duty > 0.5 ? 1 - duty : duty;
+    const bucket = Math.max(0, Math.min(15, Math.round(((sym - 0.06) / 0.44) * 15)));
+    return this.sidPulseWaves[bucket];
+  }
+
+  private updateSidGlobalFilter(ctx: AudioContext) {
+    this.ensureSidBus(ctx);
+    const gf = this.sidGlobalFilter;
+    if (!gf) return;
+    const now = ctx.currentTime;
+    const fc = (this.sidRegs[21] & 0x07) | (this.sidRegs[22] << 3); // 0..2047
+    const hz = 40 * Math.pow(300, fc / 2047); // ~40 Hz .. 12 kHz exponential 6581 curve
+    const res = (this.sidRegs[23] >> 4) & 0x0f;
+    const modeBits = this.sidRegs[24] & 0x70;
+    if (modeBits & 0x10) gf.type = 'lowpass';
+    else if (modeBits & 0x20) gf.type = 'bandpass';
+    else if (modeBits & 0x40) gf.type = 'highpass';
+    else gf.type = 'lowpass';
+    gf.frequency.setTargetAtTime(Math.max(40, Math.min(12000, hz)), now, 0.01);
+    gf.Q.setTargetAtTime(0.7 + res * 0.75, now, 0.01);
+
+    // Route voices according to $D417 bits 0..2
+    const routing = this.sidRegs[23] & 0x07;
+    for (let i = 0; i < 3; i++) {
+      const v = this.sidVoices[i];
+      if (!v || !this.sidBus) continue;
+      const wantGlobal = (routing & (1 << i)) !== 0;
+      if (wantGlobal !== v.routedToGlobalFilter) {
+        v.gain.disconnect();
+        v.gain.connect(wantGlobal ? gf : this.sidBus);
+        v.routedToGlobalFilter = wantGlobal;
+      }
+    }
+  }
+
+  private ensureSidVoice(ctx: AudioContext, voiceIdx: number) {
+    let v = this.sidVoices[voiceIdx];
+    if (!v) {
+      const bus = this.ensureSidBus(ctx);
+      const osc = ctx.createOscillator();
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'lowpass';
+      // Warm MOS 6581 analog filter character (softer on bass/pads, clear on lead)
+      filter.frequency.value = voiceIdx === 1 ? 1100 : 2200;
+      filter.Q.value = 1.6;
+      const gain = ctx.createGain();
+      gain.gain.value = 0;
+      const routed = ((this.sidRegs[23] & (1 << voiceIdx)) !== 0) && Boolean(this.sidGlobalFilter);
+      osc.connect(filter);
+      filter.connect(gain);
+      gain.connect(routed && this.sidGlobalFilter ? this.sidGlobalFilter : bus);
+      osc.start();
+      v = { osc, filter, gain, routedToGlobalFilter: routed, lastPwBucket: -1 };
+      this.sidVoices[voiceIdx] = v;
+    }
+    return v;
+  }
+
+  private triggerSidNoise(ctx: AudioContext, hz: number, peak: number, decaySec: number) {
+    if (!this.noiseBuf) return;
+    const bus = this.ensureSidBus(ctx);
+    const now = ctx.currentTime;
+    const src = ctx.createBufferSource();
+    src.buffer = this.noiseBuf;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.value = Math.max(350, Math.min(4200, hz * 1.1));
+    bp.Q.value = 0.85;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(Math.max(0.0001, peak * 0.72), now);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + Math.max(0.04, Math.min(0.26, decaySec)));
+    src.connect(bp);
+    bp.connect(g);
+    g.connect(bus);
+    src.start(now);
+    src.stop(now + Math.max(0.05, Math.min(0.28, decaySec)) + 0.01);
+  }
+
+  /** 3-Voice MOS 6581 SID synthesizer for $D400..$D418 (54272..54296) with ADSR + noise percussion. */
   sidPoke(reg: number, val: number) {
     if (reg < 0 || reg >= 25) return;
-    const prevCtrl = this.sidRegs[4];
+    const prevReg = this.sidRegs[reg];
     this.sidRegs[reg] = val & 0xff;
     const ctx = this.ensureContext();
     if (!ctx || !this.powered) return;
 
+    const now = ctx.currentTime;
     const vol = (this.sidRegs[24] & 0x0f) / 15;
-    const freqWord = this.sidRegs[0] | (this.sidRegs[1] << 8);
-    const hz = Math.max(20, Math.min(8000, freqWord * 0.06097));
-    const ctrl = this.sidRegs[4];
-    const gate = (ctrl & 0x01) !== 0;
-    const prevGate = (prevCtrl & 0x01) !== 0;
-
-    if (!this.sidOsc || !this.sidGain) {
-      this.sidOsc = ctx.createOscillator();
-      this.sidGain = ctx.createGain();
-      this.sidGain.gain.value = 0;
-      this.sidOsc.connect(this.sidGain);
-      this.sidGain.connect(ctx.destination);
-      this.sidOsc.start();
+    if (this.sidEchoWet && vol > 0) {
+      this.sidEchoWet.gain.setTargetAtTime(0.28, now, 0.05);
     }
 
-    if (ctrl & 0x40) this.sidOsc.type = 'square';
-    else if (ctrl & 0x20) this.sidOsc.type = 'sawtooth';
-    else if (ctrl & 0x10) this.sidOsc.type = 'triangle';
-    else this.sidOsc.type = 'square';
+    // Global filter registers ($D415-$D417 / regs 21..23)
+    if (reg >= 21 && reg <= 23) {
+      this.updateSidGlobalFilter(ctx);
+      return;
+    }
 
-    const now = ctx.currentTime;
-    this.sidOsc.frequency.setTargetAtTime(hz, now, 0.004);
+    // Master volume & filter mode register ($D418 / reg 24)
+    if (reg === 24) {
+      this.updateSidGlobalFilter(ctx);
+      for (let i = 0; i < 3; i++) {
+        const base = i * 7;
+        const ctrl = this.sidRegs[base + 4];
+        const v = this.sidVoices[i];
+        if (v && (ctrl & 0x01) && !(ctrl & 0x80)) {
+          v.gain.gain.cancelScheduledValues(now);
+          v.gain.gain.setTargetAtTime(vol * 0.11, now, 0.015);
+        }
+      }
+      return;
+    }
 
-    if (reg === 4) {
-      const ad = this.sidRegs[5];
-      const sr = this.sidRegs[6];
+    // Voice registers: Voice 0 = 0..6, Voice 1 = 7..13, Voice 2 = 14..20
+    const voiceIdx = Math.floor(reg / 7);
+    const base = voiceIdx * 7;
+    const localReg = reg - base;
+
+    const freqWord = this.sidRegs[base] | (this.sidRegs[base + 1] << 8);
+    const hz = Math.max(24, Math.min(8000, freqWord * 0.06097));
+    const ctrl = this.sidRegs[base + 4];
+    const gate = (ctrl & 0x01) !== 0;
+    const isNoise = (ctrl & 0x80) !== 0;
+
+    const voice = this.ensureSidVoice(ctx, voiceIdx);
+    if (!isNoise) {
+      if (ctrl & 0x40) {
+        // Variable pulse width (12-bit $D402/$D403 -> Fourier PeriodicWave when PW != 0)
+        const pw = this.sidRegs[base + 2] | ((this.sidRegs[base + 3] & 0x0f) << 8);
+        if (pw > 0 && pw < 4095) {
+          const duty = pw / 4096;
+          const sym = duty > 0.5 ? 1 - duty : duty;
+          const bucket = Math.max(0, Math.min(15, Math.round(((sym - 0.06) / 0.44) * 15)));
+          if (voice.lastPwBucket !== bucket) {
+            voice.osc.setPeriodicWave(this.getSidPulseWave(ctx, duty));
+            voice.lastPwBucket = bucket;
+          }
+        } else if (voice.lastPwBucket !== -2) {
+          voice.osc.type = 'square';
+          voice.lastPwBucket = -2;
+        }
+      } else {
+        voice.lastPwBucket = -1;
+        if (ctrl & 0x20) voice.osc.type = 'sawtooth';
+        else if (ctrl & 0x10) voice.osc.type = 'triangle';
+        else voice.osc.type = 'square';
+      }
+      voice.osc.frequency.setTargetAtTime(hz, now, 0.003);
+    }
+
+    if (localReg === 4) {
+      const prevGate = (prevReg & 0x01) !== 0;
+      const ad = this.sidRegs[base + 5];
+      const sr = this.sidRegs[base + 6];
+      const attackNibble = (ad >> 4) & 0x0f;
       const decayNibble = ad & 0x0f;
       const sustainLevel = ((sr >> 4) & 0x0f) / 15;
       const releaseNibble = sr & 0x0f;
       const hasAdsr = ad !== 0 || sr !== 0;
 
-      const peak = vol * 0.16;
-      const decaySec = hasAdsr ? 0.06 + (decayNibble / 15) * 0.85 : 0.35;
-      const sustainGain = hasAdsr ? peak * sustainLevel : peak * 0.85;
-      const releaseSec = hasAdsr ? 0.04 + (releaseNibble / 15) * 0.6 : 0.05;
+      // Balanced 3-voice mix headroom so chords + bass + lead stay punchy without clipping
+      const voiceScale = voiceIdx === 0 ? 0.11 : voiceIdx === 1 ? 0.10 : 0.075;
+      const peak = vol * voiceScale;
+      const attackSec = 0.005 + (attackNibble / 15) * 0.18;
+      const decaySec = hasAdsr ? 0.045 + (decayNibble / 15) * 0.72 : 0.32;
+      const sustainGain = hasAdsr ? peak * sustainLevel : peak * 0.8;
+      const releaseSec = hasAdsr ? 0.035 + (releaseNibble / 15) * 0.5 : 0.045;
 
-      this.sidGain.gain.cancelScheduledValues(now);
-      if (gate && !prevGate) {
-        // Fresh note trigger with SID Attack -> Decay -> Sustain envelope
-        this.sidGain.gain.setValueAtTime(0.0001, now);
-        this.sidGain.gain.linearRampToValueAtTime(Math.max(0.0001, peak), now + 0.01);
-        this.sidGain.gain.exponentialRampToValueAtTime(Math.max(0.0001, sustainGain), now + 0.01 + decaySec);
+      voice.gain.gain.cancelScheduledValues(now);
+      if (isNoise) {
+        voice.gain.gain.setTargetAtTime(0, now, 0.005);
+        if (gate && !prevGate && peak > 0.0005) {
+          this.triggerSidNoise(ctx, hz, peak, decaySec);
+        }
+      } else if (gate && !prevGate) {
+        voice.gain.gain.setValueAtTime(0.0001, now);
+        voice.gain.gain.linearRampToValueAtTime(Math.max(0.0001, peak), now + attackSec);
+        voice.gain.gain.exponentialRampToValueAtTime(
+          Math.max(0.0001, sustainGain),
+          now + attackSec + decaySec,
+        );
         if (hasAdsr && sustainLevel === 0) {
-          this.sidGain.gain.setValueAtTime(0, now + 0.02 + decaySec);
+          voice.gain.gain.setValueAtTime(0, now + attackSec + decaySec + 0.01);
         }
       } else if (!gate) {
-        this.sidGain.gain.setTargetAtTime(0, now, releaseSec * 0.35);
+        voice.gain.gain.setTargetAtTime(0, now, releaseSec * 0.3);
       }
-    } else if (reg === 24 && gate) {
-      this.sidGain.gain.cancelScheduledValues(now);
-      this.sidGain.gain.setTargetAtTime(vol * 0.14, now, 0.015);
     }
   }
 
