@@ -1,0 +1,26 @@
+{
+  "name": "day-13",
+  "private": true,
+  "description": "A minimalist Swedish two-layer adaptive sphere labyrinth with 10 progressive puzzles, diaphragm shutters, underneath half-pipe tubes, and mechanical floor switches",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "verify": "node scripts/verify-levels.mjs"
+  },
+  "devDependencies": {
+    "@types/three": "^0.187.0",
+    "@vitejs/plugin-basic-ssl": "^2.3.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1"
+  },
+  "codevember": {
+    "day": 13,
+    "word": "Labyrinth",
+    "date": "2026-11-13"
+  },
+  "dependencies": {
+    "three": "^0.187.0"
+  }
+}
