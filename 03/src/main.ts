@@ -14,7 +14,15 @@ import {
 } from './shape';
 import { getSharedNoise3DTexture } from './noise3d';
 import { createMacroStudioEnv, disposeSeedTextureCache } from './textures';
-import { createFruitAssembly, FruitAssembly } from './fruits';
+import {
+  createFruitAssembly,
+  createToppingDebugStage,
+  FruitAssembly,
+  RASPBERRY_LIGHT_UNIFORMS,
+  ToppingDebugFilter,
+  ToppingDebugMode,
+  ToppingDebugStage,
+} from './fruits';
 import { createPopsicleIceSystem, PopsicleIceSystem } from './popsicleIce';
 import {
   createWaterDropSystem,
@@ -25,6 +33,7 @@ import {
   WaterDropSystem,
 } from './waterDrops';
 import { createLiquidFilmSystem, LiquidFilmSystem } from './liquidFilm';
+import { getCustomizeIcons } from './customizeIcons';
 import {
   BaseKind,
   DEFAULT_RECIPE,
@@ -43,7 +52,6 @@ import {
 const params = new URLSearchParams(window.location.search);
 if (params.has('clean')) document.documentElement.classList.add('clean');
 
-const showSettings = import.meta.env.DEV || params.has('settings');
 const rawSeed = Number(params.get('seed'));
 let currentSeed = Number.isFinite(rawSeed) && rawSeed >= 1 ? Math.floor(rawSeed) : 1;
 const rawMelt = params.has('melt') ? Number(params.get('melt')) : DEFAULT_INITIAL_MELT;
@@ -183,24 +191,40 @@ canvas.addEventListener('webglcontextlost', (e) => {
 canvas.addEventListener('webglcontextrestored', () => {
   contextLost = false;
   rebuildRenderTargets();
+  updatePresetPeekShift();
   renderDirty = true;
 });
 
 // === MACRO STUDIO CAMERA (~90mm telephoto portrait framing with subtle underside perspective) ===
 const camera = new THREE.PerspectiveCamera(27, initVP.w / initVP.h, 0.1, 30);
-const BASE_CAM_POS = new THREE.Vector3(0, -1.16, 5.66);
-const BASE_TARGET = new THREE.Vector3(0, -0.09, 0);
+const DESKTOP_CAM_POS = new THREE.Vector3(0, -1.56, 7.09);
+const DESKTOP_TARGET = new THREE.Vector3(0, -0.22, 0);
+// On portrait mobile screens, bring the popsicle slightly closer (~9% larger) and higher above the persistent dock!
+const MOBILE_CAM_POS = new THREE.Vector3(0, -1.58, 6.52);
+const MOBILE_TARGET = new THREE.Vector3(0, -0.35, 0);
+const BASE_CAM_POS = new THREE.Vector3();
+const BASE_TARGET = new THREE.Vector3();
+let lastMobileFraming = false;
+
+function syncBaseFraming(vp: { w: number; h: number }): boolean {
+  const portraitMobile = vp.w <= 860 && vp.h > vp.w;
+  BASE_CAM_POS.copy(portraitMobile ? MOBILE_CAM_POS : DESKTOP_CAM_POS);
+  BASE_TARGET.copy(portraitMobile ? MOBILE_TARGET : DESKTOP_TARGET);
+  return portraitMobile;
+}
+
+lastMobileFraming = syncBaseFraming(initVP);
 camera.position.copy(BASE_CAM_POS);
 camera.lookAt(BASE_TARGET);
 
-// Subtle cinematic telephoto dolly-back as the popsicle melts (+1.75 units ≈ 30% wider framing by bare stick)
-const MELT_ZOOM_OUT_MAX = 1.75;
+// Subtle cinematic telephoto dolly-back as the popsicle melts
+const MELT_ZOOM_OUT_MAX = 1.15;
 let appliedMeltZoom = 0;
 let initialBootDone = false;
 const _zoomOffsetVec = new THREE.Vector3();
 
 function evalMeltZoomOffset(melt: number): number {
-  const t = clamp((melt - 0.05) / 0.93, 0, 1);
+  const t = clamp((melt - 0.05) / 0.72, 0, 1);
   return t * t * (3 - 2 * t) * MELT_ZOOM_OUT_MAX;
 }
 
@@ -244,7 +268,7 @@ orbit.touches = {
   TWO: THREE.TOUCH.DOLLY_ROTATE,
 };
 orbit.minDistance = 3.2;
-orbit.maxDistance = 9.0;
+orbit.maxDistance = 9.8;
 // Curated macro studio vertical tilt band (~20° above to ~17.5° below horizontal) with full 360° spin
 orbit.minPolarAngle = Math.PI * 0.5 - 0.35;
 orbit.maxPolarAngle = Math.PI * 0.5 + 0.31;
@@ -383,12 +407,12 @@ const blurMat = new THREE.ShaderMaterial({
 
     void main() {
       vec2 stepUv = uDir * uTexelSize;
-      vec3 sum = texture2D(uTex, vUv).rgb * 0.227027;
-      sum += texture2D(uTex, clamp(vUv + stepUv * 1.3846, vec2(0.002), vec2(0.998))).rgb * 0.316216;
-      sum += texture2D(uTex, clamp(vUv - stepUv * 1.3846, vec2(0.002), vec2(0.998))).rgb * 0.316216;
-      sum += texture2D(uTex, clamp(vUv + stepUv * 3.2307, vec2(0.002), vec2(0.998))).rgb * 0.070270;
-      sum += texture2D(uTex, clamp(vUv - stepUv * 3.2307, vec2(0.002), vec2(0.998))).rgb * 0.070270;
-      gl_FragColor = vec4(sum, 1.0);
+      vec4 sum = texture2D(uTex, vUv) * 0.227027;
+      sum += texture2D(uTex, clamp(vUv + stepUv * 1.3846, vec2(0.002), vec2(0.998))) * 0.316216;
+      sum += texture2D(uTex, clamp(vUv - stepUv * 1.3846, vec2(0.002), vec2(0.998))) * 0.316216;
+      sum += texture2D(uTex, clamp(vUv + stepUv * 3.2307, vec2(0.002), vec2(0.998))) * 0.070270;
+      sum += texture2D(uTex, clamp(vUv - stepUv * 3.2307, vec2(0.002), vec2(0.998))) * 0.070270;
+      gl_FragColor = sum;
     }
   `,
 });
@@ -544,6 +568,8 @@ function rebuildRenderTargets() {
   const eighthH = Math.max(2, rtHeight >> 3);
   const zW = isMobile ? Math.max(2, Math.floor(rtWidth * 0.4)) : halfW;
   const zH = isMobile ? Math.max(2, Math.floor(rtHeight * 0.4)) : halfH;
+  const intZW = isMobile ? Math.max(2, Math.floor(rtWidth * 0.75)) : rtWidth;
+  const intZH = isMobile ? Math.max(2, Math.floor(rtHeight * 0.75)) : rtHeight;
   const bubW = isMobile ? Math.max(2, Math.floor(rtWidth * 0.75)) : rtWidth;
   const bubH = isMobile ? Math.max(2, Math.floor(rtHeight * 0.75)) : rtHeight;
 
@@ -563,8 +589,9 @@ function rebuildRenderTargets() {
   wireRT?.dispose();
 
   // NearestFilter on camera-depth targets guarantees far clear sentinel (100.0) NEVER interpolates across edges!
+  // Full-res interiorZRT eliminates 2x2 stair-stepped depth mismatches along shallow topping silhouettes!
   backIceZRT = makeRT(zW, zH, true, false);
-  interiorZRT = makeRT(zW, zH, true, false);
+  interiorZRT = makeRT(intZW, intZH, true, false);
   bgRT = makeRT(rtWidth, rtHeight, true, true);
   bubblesRT = makeRT(bubW, bubH, true, true, isMobile ? THREE.UnsignedByteType : THREE.HalfFloatType);
   blurTemp1RT = makeRT(halfW, halfH, false, true);
@@ -598,6 +625,10 @@ rebuildRenderTargets();
 const solidScene = new THREE.Scene();
 const solidLights = buildStudioLights();
 solidScene.add(solidLights);
+// Dedicated warm grazing side-back key light synchronized with raspberry side-translucency direction
+const sideKeyLight = new THREE.DirectionalLight(0xfff1e4, 1.35);
+sideKeyLight.position.set(-3.5, 0.9, -1.6);
+solidScene.add(sideKeyLight);
 
 const backZScene = new THREE.Scene();
 const bubblesScene = new THREE.Scene();
@@ -609,6 +640,25 @@ let fruitAssembly: FruitAssembly | null = null;
 let iceSystem: PopsicleIceSystem | null = null;
 let waterDrops: WaterDropSystem | null = null;
 let liquidFilm: LiquidFilmSystem | null = null;
+let toppingDebugStage: ToppingDebugStage | null = null;
+
+// === LOCAL-DEV TOPPING DEBUG STAGE STATE ===
+const rawToppingsParam = params.get('toppings');
+let toppingDebugMode: ToppingDebugMode =
+  rawToppingsParam === 'outside' || rawToppingsParam === 'both' || rawToppingsParam === 'inside'
+    ? rawToppingsParam
+    : params.has('toppings')
+      ? 'both'
+      : 'off';
+const rawToppingFilter = params.get('topping');
+let toppingDebugFilter: ToppingDebugFilter =
+  rawToppingFilter && TOPPING_LIST.some((t) => t.id === rawToppingFilter)
+    ? (rawToppingFilter as ToppingId)
+    : 'all';
+let floatAirRaspberry = params.has('air_raspberry');
+let toppingDebugLightDeg = -112;
+let toppingDebugSpin = false;
+let savedNormalRecipe: PopsicleRecipe | null = null;
 
 const rawTurntableParam = params.has('turntable') ? Number(params.get('turntable')) : NaN;
 const simParams = {
@@ -656,42 +706,6 @@ function savePersistedSettings() {
   }
 }
 
-function clearPersistedSettings() {
-  try {
-    window.localStorage.removeItem(SETTINGS_STORAGE_KEY);
-    window.localStorage.removeItem(LEGACY_SETTINGS_STORAGE_KEY);
-  } catch {
-    // Ignore storage errors
-  }
-}
-
-async function copyTextToClipboard(text: string): Promise<boolean> {
-  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-    try {
-      await navigator.clipboard.writeText(text);
-      return true;
-    } catch {
-      // Fall through to legacy textarea copy (needed on plain HTTP LAN origins)
-    }
-  }
-  try {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.setAttribute('readonly', '');
-    ta.style.position = 'fixed';
-    ta.style.top = '-9999px';
-    ta.style.left = '-9999px';
-    document.body.appendChild(ta);
-    ta.focus();
-    ta.select();
-    const ok = document.execCommand('copy');
-    document.body.removeChild(ta);
-    return ok;
-  } catch {
-    return false;
-  }
-}
-
 const meltState: MeltFieldState = {
   melt: initialMelt,
   time: 0,
@@ -728,15 +742,18 @@ let pendingPointerMove = false;
 let pendingPointerX = 0;
 let pendingPointerY = 0;
 
-function syncSystemsToMelt(targetMelt: number) {
+const CUSTOMIZE_PREVIEW_MELT = 0.105;
+
+function syncSystemsToMelt(targetMelt: number, resetTransient = false) {
   releaseActiveGrab();
   meltState.melt = clamp(Number.isFinite(targetMelt) ? targetMelt : DEFAULT_INITIAL_MELT, 0, 1.0);
   fallFocusBlend = 0;
-  if (meltState.melt <= DEFAULT_INITIAL_MELT + 0.005) {
+  if (resetTransient || meltState.melt <= DEFAULT_INITIAL_MELT + 0.005) {
     meltState.heatSpots = [];
     meltState.pointerHeat = 0;
     meltState.bottomLobes = [1, 1, 1, 1];
     meltState.pendantPull = [0, 0, 0, 0];
+    fruitAssembly?.reset();
     waterDrops?.reset();
   }
   if (iceSystem && fruitAssembly && waterDrops && liquidFilm) {
@@ -817,8 +834,10 @@ function buildPopsicle(seed: number, startMelt = initialMelt) {
     applyMeltCameraZoom(0, true);
     initialBootDone = true;
   }
-  syncWorkbenchUI();
   syncCustomizeUI();
+  if (toppingDebugMode !== 'off' || floatAirRaspberry) {
+    applyToppingDebugVisibility();
+  }
   renderDirty = true;
 }
 
@@ -879,7 +898,6 @@ function resetMelt() {
     fruitAssembly.update(meltState, 0, liquidFilm.stickWetness);
     waterDrops.update(meltState, iceSystem, liquidFilm, 0, simParams.speed);
   }
-  syncWorkbenchUI();
   renderDirty = true;
 }
 
@@ -920,7 +938,7 @@ function hitEmbeddedFruit(): boolean {
 }
 
 function isPointerOnIceCream(): boolean {
-  if (reveal < 0.85) return false;
+  if (reveal < 0.85 || toppingDebugMode === 'outside') return false;
   if (iceSystem && iceSystem.iceMesh.visible) {
     if (raycaster.intersectObject(iceSystem.iceMesh, false).length > 0) return true;
   }
@@ -948,8 +966,8 @@ function updatePointerWorld(clientX: number, clientY: number) {
     return;
   }
 
-  // While wireframe loader is showing, dragging anywhere orbits cleanly without hovering/rubbing unseen ice
-  if (reveal < 0.85) {
+  // While wireframe loader or outside-ice debug stage is showing, dragging anywhere orbits cleanly
+  if (reveal < 0.85 || toppingDebugMode === 'outside') {
     pointerActive = false;
     prevFrostU = null;
     prevFrostV = null;
@@ -1277,16 +1295,12 @@ canvas.addEventListener('pointerleave', () => {
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
 // === UI CONTROLS ===
-const btnCustomize = document.getElementById('btn-customize') as HTMLButtonElement;
-const customizePanel = document.getElementById('customize-panel') as HTMLDivElement;
-const btnCustRandom = document.getElementById('btn-cust-random') as HTMLButtonElement;
-const btnCustReset = document.getElementById('btn-cust-reset') as HTMLButtonElement;
-const custBaseNote = document.getElementById('cust-base-note') as HTMLSpanElement;
-const custFlavorNote = document.getElementById('cust-flavor-note') as HTMLSpanElement;
-const custToppingNote = document.getElementById('cust-topping-note') as HTMLSpanElement;
+const customizeStudio = document.getElementById('customize-studio') as HTMLDivElement;
 const custFlavorsEl = document.getElementById('cust-flavors') as HTMLDivElement;
 const custToppingsEl = document.getElementById('cust-toppings') as HTMLDivElement;
-const baseBtns = Array.from(customizePanel.querySelectorAll<HTMLButtonElement>('[data-base]'));
+const imgBaseWater = document.getElementById('img-base-water') as HTMLImageElement;
+const imgBaseCoconut = document.getElementById('img-base-coconut') as HTMLImageElement;
+const baseBtns = Array.from(customizeStudio.querySelectorAll<HTMLButtonElement>('[data-base]'));
 
 const presetDock = document.getElementById('preset-dock') as HTMLElement;
 
@@ -1310,113 +1324,291 @@ for (let i = 0; i < POPSICLE_PRESETS.length; i++) {
   img.draggable = false;
   img.decoding = 'async';
   btn.appendChild(img);
-  btn.addEventListener('click', () => {
+  btn.addEventListener('click', (e) => {
+    // On touch/peeking state, tapping the active popsicle expands the full bar; tapping another switches immediately!
+    if (presetDock.classList.contains('is-peeking') && recipesMatch(currentRecipe, preset.recipe)) {
+      e.preventDefault();
+      expandPresetDock(2800);
+      return;
+    }
     applyPreset(preset);
+    if (!dockHovered && customizeStudio.hidden) expandPresetDock(1800);
   });
   presetDock.appendChild(btn);
   presetButtons.set(preset.id, btn);
 }
 
+// Etched glass vertical separator + Customize trigger on the main preset selector dock!
+const presetSep = document.createElement('span');
+presetSep.className = 'preset-sep';
+presetSep.setAttribute('aria-hidden', 'true');
+presetDock.appendChild(presetSep);
+
+const btnCustomize = document.createElement('button');
+btnCustomize.id = 'btn-dock-customize';
+btnCustomize.type = 'button';
+btnCustomize.className = 'preset-btn preset-customize-btn';
+btnCustomize.dataset.label = 'Customize';
+btnCustomize.title = 'Customize popsicle (C)';
+btnCustomize.setAttribute('aria-label', 'Customize popsicle');
+btnCustomize.setAttribute('aria-expanded', 'false');
+btnCustomize.setAttribute('aria-controls', 'customize-studio');
+const custDockImg = document.createElement('img');
+custDockImg.src = `${ASSET_BASE}presets/customize-raspberry.webp`;
+custDockImg.alt = '';
+custDockImg.width = 96;
+custDockImg.height = 96;
+custDockImg.draggable = false;
+custDockImg.decoding = 'async';
+btnCustomize.appendChild(custDockImg);
+presetDock.appendChild(btnCustomize);
+
+let dockHideTimer: number | null = null;
+let dockHovered = false;
+let customizeIconsLoaded = false;
+
+function ensureCustomizeIcons() {
+  if (customizeIconsLoaded) return;
+  const icons = getCustomizeIcons(renderer, ensureStudioEnv());
+  imgBaseWater.src = icons.bases.water;
+  imgBaseCoconut.src = icons.bases.coconut;
+  for (const [id, img] of flavorImages) {
+    img.src = icons.flavors[id];
+  }
+  for (const [id, img] of toppingImages) {
+    img.src = icons.toppings[id];
+  }
+  customizeIconsLoaded = true;
+}
+
+function setCustomizeOpen(open: boolean) {
+  if (open) {
+    ensureCustomizeIcons();
+    clearPresetDockTimer();
+    setPresetDockPeeking(false);
+    // Present the popsicle fresh out of the fridge with some frost cleared so colors & toppings read clearly!
+    syncSystemsToMelt(CUSTOMIZE_PREVIEW_MELT, true);
+  }
+  customizeStudio.hidden = !open;
+  btnCustomize.setAttribute('aria-expanded', String(open));
+  if (!open && !dockHovered && !paused) {
+    schedulePresetDockHide(1100);
+  }
+}
+
+function updatePresetPeekShift() {
+  const activeBtn = presetDock.querySelector<HTMLButtonElement>('.preset-btn[aria-pressed="true"]');
+  if (!activeBtn || presetDock.clientWidth <= 0) {
+    presetDock.style.setProperty('--peek-shift', '0px');
+    return;
+  }
+  const btnCenter = activeBtn.offsetLeft + activeBtn.offsetWidth * 0.5;
+  const dockCenter = presetDock.clientWidth * 0.5;
+  presetDock.style.setProperty('--peek-shift', `${(dockCenter - btnCenter).toFixed(1)}px`);
+}
+
+function clearPresetDockTimer() {
+  if (dockHideTimer !== null) {
+    window.clearTimeout(dockHideTimer);
+    dockHideTimer = null;
+  }
+}
+
+const mobileDockMQ = window.matchMedia('(max-width: 860px), (hover: none) and (pointer: coarse)');
+function shouldKeepPresetDockVisible(): boolean {
+  return mobileDockMQ.matches;
+}
+
+function setPresetDockPeeking(peeking: boolean) {
+  clearPresetDockTimer();
+  if (peeking && customizeStudio.hidden && !shouldKeepPresetDockVisible()) {
+    updatePresetPeekShift();
+    presetDock.classList.add('is-peeking');
+  } else {
+    presetDock.classList.remove('is-peeking');
+  }
+}
+
+function schedulePresetDockHide(delayMs = 1150) {
+  if (paused || dockHovered || !customizeStudio.hidden || shouldKeepPresetDockVisible()) return;
+  clearPresetDockTimer();
+  dockHideTimer = window.setTimeout(() => {
+    dockHideTimer = null;
+    if (!dockHovered && customizeStudio.hidden && !shouldKeepPresetDockVisible() && !presetDock.matches(':focus-within')) {
+      setPresetDockPeeking(true);
+    }
+  }, delayMs);
+}
+
+mobileDockMQ.addEventListener('change', () => {
+  if (shouldKeepPresetDockVisible()) {
+    setPresetDockPeeking(false);
+  } else if (!dockHovered && customizeStudio.hidden && !paused) {
+    schedulePresetDockHide(1100);
+  }
+});
+
+function expandPresetDock(autoHideMs?: number) {
+  setPresetDockPeeking(false);
+  if (autoHideMs !== undefined && customizeStudio.hidden) {
+    schedulePresetDockHide(autoHideMs);
+  }
+}
+
+presetDock.addEventListener('pointerenter', () => {
+  dockHovered = true;
+  clearPresetDockTimer();
+  setPresetDockPeeking(false);
+});
+
+presetDock.addEventListener('pointerleave', () => {
+  dockHovered = false;
+  schedulePresetDockHide(1100);
+});
+
+presetDock.addEventListener('focusin', () => {
+  clearPresetDockTimer();
+  setPresetDockPeeking(false);
+});
+
+presetDock.addEventListener('focusout', () => {
+  schedulePresetDockHide(1100);
+});
+
+// Tapping the canvas collapses an expanded desktop dock right away (unless Customize studio is open)
+canvas.addEventListener(
+  'pointerdown',
+  () => {
+    if (!dockHovered && !paused && customizeStudio.hidden && !presetDock.classList.contains('is-peeking')) {
+      setPresetDockPeeking(true);
+    }
+  },
+  { passive: true },
+);
+
+// Tapping/clicking anywhere outside the Customize controls (without dragging to orbit/scroll) closes Customize!
+let custOutsideTap: { id: number; x: number; y: number } | null = null;
+window.addEventListener(
+  'pointerdown',
+  (e) => {
+    if (customizeStudio.hidden || !e.isPrimary) {
+      custOutsideTap = null;
+      return;
+    }
+    const target = e.target instanceof Element ? e.target : null;
+    if (target?.closest('.float-obj, #cust-mobile-tabs, #preset-dock, .plate a')) {
+      custOutsideTap = null;
+      return;
+    }
+    custOutsideTap = { id: e.pointerId, x: e.clientX, y: e.clientY };
+  },
+  { passive: true },
+);
+window.addEventListener(
+  'pointerup',
+  (e) => {
+    if (!custOutsideTap || e.pointerId !== custOutsideTap.id) return;
+    const dist = Math.hypot(e.clientX - custOutsideTap.x, e.clientY - custOutsideTap.y);
+    custOutsideTap = null;
+    if (dist < 8 && !customizeStudio.hidden) {
+      setCustomizeOpen(false);
+    }
+  },
+  { passive: true },
+);
+window.addEventListener(
+  'pointercancel',
+  () => {
+    custOutsideTap = null;
+  },
+  { passive: true },
+);
+
 function applyPreset(preset: PopsiclePreset) {
   const isSamePreset = recipesMatch(currentRecipe, preset.recipe);
   currentRecipe = normalizeRecipe(preset.recipe);
-  if (isSamePreset) {
-    // Clicking the currently active popsicle generates a brand-new frozen mix with a fresh seed
-    buildPopsicle(currentSeed + 1, DEFAULT_INITIAL_MELT);
-    return;
-  }
-  const nextMelt = meltState.melt > 0.65 ? DEFAULT_INITIAL_MELT : meltState.melt;
-  buildPopsicle(preset.seed, nextMelt);
+  // Always start a fresh melt cycle (lightly defrosted if Customize view is open, fresh freezer frost otherwise)
+  const nextSeed = isSamePreset ? currentSeed + 1 : preset.seed;
+  const startMelt = customizeStudio.hidden ? DEFAULT_INITIAL_MELT : CUSTOMIZE_PREVIEW_MELT;
+  buildPopsicle(nextSeed, startMelt);
 }
 
 function syncPresetUI() {
+  let matchedAnyPreset = false;
   for (let i = 0; i < POPSICLE_PRESETS.length; i++) {
     const preset = POPSICLE_PRESETS[i];
     const btn = presetButtons.get(preset.id);
     if (!btn) continue;
     const active = recipesMatch(currentRecipe, preset.recipe);
+    if (active) matchedAnyPreset = true;
     btn.setAttribute('aria-pressed', String(active));
     btn.title = active
       ? `${preset.name} — click for new mix (${i + 1})`
       : `${preset.name} (${i + 1})`;
   }
+  btnCustomize.dataset.customActive = String(!matchedAnyPreset);
+  updatePresetPeekShift();
 }
 
-const devDock = document.getElementById('dev-dock') as HTMLDivElement;
-const btnSettings = document.getElementById('btn-settings') as HTMLButtonElement;
-const settingsPanel = document.getElementById('settings-panel') as HTMLDivElement;
-const btnSettingsCopy = document.getElementById('btn-settings-copy') as HTMLButtonElement;
-const btnSettingsReset = document.getElementById('btn-settings-reset') as HTMLButtonElement;
-const slMelt = document.getElementById('sl-melt') as HTMLInputElement;
-const slSpeed = document.getElementById('sl-speed') as HTMLInputElement;
-const slTurntable = document.getElementById('sl-turntable') as HTMLInputElement;
-const slFrost = document.getElementById('sl-frost') as HTMLInputElement;
-const slBubbles = document.getElementById('sl-bubbles') as HTMLInputElement;
-const selDrops = document.getElementById('sel-drops') as HTMLSelectElement;
-const selFall = document.getElementById('sel-fall') as HTMLSelectElement;
-const valMelt = document.getElementById('val-melt') as HTMLOutputElement;
-const valSpeed = document.getElementById('val-speed') as HTMLOutputElement;
-const valTurntable = document.getElementById('val-turntable') as HTMLOutputElement;
-const valFrost = document.getElementById('val-frost') as HTMLOutputElement;
-const valBubbles = document.getElementById('val-bubbles') as HTMLOutputElement;
-
-const btnDropReset = document.getElementById('btn-drop-reset') as HTMLButtonElement;
-const dropControls: Array<{
-  key: keyof DropDebugParams;
-  input: HTMLInputElement;
-  output: HTMLOutputElement;
-  repack?: boolean;
-  decimals?: number;
-}> = [
-  { key: 'sag', input: document.getElementById('sl-drop-sag') as HTMLInputElement, output: document.getElementById('val-drop-sag') as HTMLOutputElement },
-  { key: 'stretch', input: document.getElementById('sl-drop-stretch') as HTMLInputElement, output: document.getElementById('val-drop-stretch') as HTMLOutputElement },
-  { key: 'edgeBlur', input: document.getElementById('sl-drop-blur') as HTMLInputElement, output: document.getElementById('val-drop-blur') as HTMLOutputElement },
-  { key: 'shadow', input: document.getElementById('sl-drop-shadow') as HTMLInputElement, output: document.getElementById('val-drop-shadow') as HTMLOutputElement },
-  { key: 'shadowBlur', input: document.getElementById('sl-drop-shblur') as HTMLInputElement, output: document.getElementById('val-drop-shblur') as HTMLOutputElement },
-  { key: 'rimDark', input: document.getElementById('sl-drop-rim') as HTMLInputElement, output: document.getElementById('val-drop-rim') as HTMLOutputElement },
-  { key: 'size', input: document.getElementById('sl-drop-size') as HTMLInputElement, output: document.getElementById('val-drop-size') as HTMLOutputElement },
-  { key: 'bottomPool', input: document.getElementById('sl-drop-pool') as HTMLInputElement, output: document.getElementById('val-drop-pool') as HTMLOutputElement, repack: true },
-  { key: 'bottomDrops', input: document.getElementById('sl-drop-botcount') as HTMLInputElement, output: document.getElementById('val-drop-botcount') as HTMLOutputElement, repack: true, decimals: 0 },
-  { key: 'dripRate', input: document.getElementById('sl-drop-drip') as HTMLInputElement, output: document.getElementById('val-drop-drip') as HTMLOutputElement },
+// Organic hand-drawn fine-liner ink loop paths so every selected floating item feels individually sketched!
+const OBJ_PEN_PATHS = [
+  'M22 21 C44 8, 86 11, 100 31 C111 49, 103 80, 79 90 C50 100, 17 92, 11 68 C5 44, 21 19, 49 14',
+  'M89 19 C65 7, 25 13, 13 35 C3 56, 14 85, 42 92 C72 99, 103 85, 107 61 C110 37, 92 16, 65 13',
+  'M27 16 C56 6, 95 16, 105 40 C113 62, 96 89, 68 94 C38 99, 10 83, 9 57 C8 32, 28 14, 57 12',
+  'M84 15 C55 7, 19 18, 11 44 C4 68, 22 92, 51 95 C81 98, 107 80, 108 55 C109 30, 88 12, 60 11',
 ];
 
-if (showSettings) {
-  devDock.hidden = false;
-}
+// Clean, organized 3×3 organic constellation for the 9 uniform-size 3D juice droplets (left wing)
+const TASTE_FLOAT_LAYOUT: Array<{ x: number; y: number; size: number; rot: number }> = [
+  { x: 18, y: 8, size: 68, rot: -4 },       // mango
+  { x: 110, y: 4, size: 68, rot: 4 },       // lemon
+  { x: 202, y: 10, size: 68, rot: -3 },     // orange
+  { x: 14, y: 102, size: 68, rot: 3 },      // watermelon
+  { x: 108, y: 98, size: 68, rot: -4 },     // strawberry
+  { x: 200, y: 104, size: 68, rot: 4 },     // raspberry
+  { x: 18, y: 196, size: 68, rot: -3 },     // blueberry
+  { x: 110, y: 192, size: 68, rot: 4 },     // banana
+  { x: 202, y: 198, size: 68, rot: -4 },    // chocolate
+];
 
-function syncWorkbenchUI() {
-  slMelt.value = meltState.melt.toFixed(3);
-  valMelt.textContent = meltState.melt.toFixed(2);
-  slSpeed.value = simParams.speed.toFixed(1);
-  valSpeed.textContent = `${simParams.speed.toFixed(1)}×`;
-  slTurntable.value = simParams.turntable.toFixed(2);
-  valTurntable.textContent = simParams.turntable <= 0.001 ? 'Off' : simParams.turntable.toFixed(2);
-  slFrost.value = simParams.frost.toFixed(2);
-  valFrost.textContent = simParams.frost.toFixed(2);
-  slBubbles.value = simParams.bubbles.toFixed(2);
-  valBubbles.textContent = simParams.bubbles.toFixed(2);
-  selDrops.value = currentDropMode;
-  selFall.value = currentFallMode;
-  for (const c of dropControls) {
-    const dec = c.decimals ?? 2;
-    c.input.value = dropDebug[c.key].toFixed(dec);
-    c.output.textContent = dropDebug[c.key].toFixed(dec);
-  }
-}
+// Clean, balanced 2×3 organic constellation for the 6 real 3D toppings (right wing; harmonized sizes!)
+const TOPPING_FLOAT_LAYOUT: Array<{ x: number; y: number; size: number; rot: number }> = [
+  { x: 18, y: 14, size: 92, rot: -4 },      // blueberry
+  { x: 148, y: 20, size: 84, rot: 5 },      // chocolate
+  { x: 22, y: 132, size: 86, rot: 3 },      // shaved-lemon
+  { x: 144, y: 126, size: 94, rot: -5 },    // strawberry
+  { x: 16, y: 244, size: 96, rot: 4 },      // raspberry
+  { x: 148, y: 252, size: 84, rot: -3 },    // kaksmulor
+];
 
-// Build Customize taste & topping chips deterministically from recipe lists
 const flavorButtons = new Map<FlavorId, HTMLButtonElement>();
-for (const flv of FLAVOR_LIST) {
+const flavorImages = new Map<FlavorId, HTMLImageElement>();
+for (let i = 0; i < FLAVOR_LIST.length; i++) {
+  const flv = FLAVOR_LIST[i];
+  const lay = TASTE_FLOAT_LAYOUT[i % TASTE_FLOAT_LAYOUT.length];
   const btn = document.createElement('button');
   btn.type = 'button';
-  btn.className = 'chip';
+  btn.className = 'float-obj taste-chunk-btn';
   btn.dataset.flavor = flv.id;
-  btn.innerHTML = `<span class="swatch" style="background:${flv.swatch}"></span><span>${flv.label}</span>`;
+  btn.dataset.tip = flv.label;
+  btn.setAttribute('aria-label', flv.label);
+  btn.setAttribute('aria-pressed', 'false');
+  btn.style.setProperty('--fx', `${lay.x}px`);
+  btn.style.setProperty('--fy', `${lay.y}px`);
+  btn.style.setProperty('--size', `${lay.size}px`);
+  btn.style.setProperty('--rot', `${lay.rot}deg`);
+  btn.style.setProperty('--float-delay', `${(-0.5 - i * 0.67).toFixed(2)}s`);
+  btn.style.setProperty('--float-dur', `${(4.7 + (i % 4) * 0.45).toFixed(2)}s`);
+  const penPath = OBJ_PEN_PATHS[(i + 1) % OBJ_PEN_PATHS.length];
+  btn.innerHTML = `<svg class="pen-ring" viewBox="0 0 116 102" fill="none" aria-hidden="true"><path pathLength="1" d="${penPath}" /></svg><span class="obj-stage"></span>`;
+  const img = document.createElement('img');
+  img.alt = '';
+  img.draggable = false;
+  btn.querySelector('.obj-stage')!.appendChild(img);
   btn.addEventListener('click', () => {
     const cur = [...currentRecipe.flavors];
     const idx = cur.indexOf(flv.id);
     if (idx >= 0) {
-      // On water base keep at least 1 flavor; on coconut allow 0 for pure coconut cream!
       if (currentRecipe.base === 'coconut' || cur.length > 1) {
         cur.splice(idx, 1);
       }
@@ -1428,15 +1620,33 @@ for (const flv of FLAVOR_LIST) {
   });
   custFlavorsEl.appendChild(btn);
   flavorButtons.set(flv.id, btn);
+  flavorImages.set(flv.id, img);
 }
 
 const toppingButtons = new Map<ToppingId, HTMLButtonElement>();
-for (const top of TOPPING_LIST) {
+const toppingImages = new Map<ToppingId, HTMLImageElement>();
+for (let i = 0; i < TOPPING_LIST.length; i++) {
+  const top = TOPPING_LIST[i];
+  const lay = TOPPING_FLOAT_LAYOUT[i % TOPPING_FLOAT_LAYOUT.length];
   const btn = document.createElement('button');
   btn.type = 'button';
-  btn.className = 'chip';
+  btn.className = 'float-obj topping-card';
   btn.dataset.topping = top.id;
-  btn.innerHTML = `<span class="swatch" style="background:${top.swatch}"></span><span>${top.label}</span>`;
+  btn.dataset.tip = top.label;
+  btn.setAttribute('aria-label', top.label);
+  btn.setAttribute('aria-pressed', 'false');
+  btn.style.setProperty('--fx', `${lay.x}px`);
+  btn.style.setProperty('--fy', `${lay.y}px`);
+  btn.style.setProperty('--size', `${lay.size}px`);
+  btn.style.setProperty('--rot', `${lay.rot}deg`);
+  btn.style.setProperty('--float-delay', `${(-0.8 - i * 0.92).toFixed(2)}s`);
+  btn.style.setProperty('--float-dur', `${(4.9 + (i % 3) * 0.52).toFixed(2)}s`);
+  const penPath = OBJ_PEN_PATHS[i % OBJ_PEN_PATHS.length];
+  btn.innerHTML = `<svg class="pen-ring" viewBox="0 0 116 102" fill="none" aria-hidden="true"><path pathLength="1" d="${penPath}" /></svg><span class="obj-stage"></span>`;
+  const img = document.createElement('img');
+  img.alt = '';
+  img.draggable = false;
+  btn.querySelector('.obj-stage')!.appendChild(img);
   btn.addEventListener('click', () => {
     const cur = [...currentRecipe.toppings];
     const idx = cur.indexOf(top.id);
@@ -1446,6 +1656,22 @@ for (const top of TOPPING_LIST) {
   });
   custToppingsEl.appendChild(btn);
   toppingButtons.set(top.id, btn);
+  toppingImages.set(top.id, img);
+}
+
+// Mobile bottom category switcher (Base · Taste · Toppings): shows one clean floating row at a time
+const custMobileTabs = Array.from(document.querySelectorAll<HTMLButtonElement>('#cust-mobile-tabs .cust-tab-btn'));
+function setMobileCustomizeTab(tab: 'base' | 'taste' | 'toppings') {
+  customizeStudio.dataset.mobileTab = tab;
+  for (const tBtn of custMobileTabs) {
+    tBtn.setAttribute('aria-selected', String(tBtn.dataset.tab === tab));
+  }
+}
+for (const tBtn of custMobileTabs) {
+  tBtn.addEventListener('click', () => {
+    const tab = tBtn.dataset.tab as 'base' | 'taste' | 'toppings' | undefined;
+    if (tab) setMobileCustomizeTab(tab);
+  });
 }
 
 for (const btn of baseBtns) {
@@ -1461,121 +1687,76 @@ function syncCustomizeUI() {
   for (const btn of baseBtns) {
     btn.setAttribute('aria-pressed', String(btn.dataset.base === currentRecipe.base));
   }
-  custBaseNote.textContent = currentRecipe.base === 'coconut' ? 'Opaque condensed milk' : 'Translucent ice';
-
   for (const [id, btn] of flavorButtons) {
     btn.setAttribute('aria-pressed', String(currentRecipe.flavors.includes(id)));
   }
-  if (currentRecipe.flavors.length === 0) {
-    custFlavorNote.textContent = 'Pure condensed milk';
-  } else {
-    custFlavorNote.textContent = `${currentRecipe.flavors.length} / 2 max`;
-  }
-
   for (const [id, btn] of toppingButtons) {
     btn.setAttribute('aria-pressed', String(currentRecipe.toppings.includes(id)));
   }
-  custToppingNote.textContent =
-    currentRecipe.toppings.length === 0
-      ? 'None'
-      : `${currentRecipe.toppings.length} selected`;
   syncPresetUI();
 }
 
+function ensureToppingDebugStage(): ToppingDebugStage {
+  if (!toppingDebugStage) {
+    toppingDebugStage = createToppingDebugStage(currentSeed);
+    solidScene.add(toppingDebugStage.group);
+  }
+  return toppingDebugStage;
+}
+
+function applyToppingDebugVisibility() {
+  const activeStage = toppingDebugMode !== 'off' || floatAirRaspberry;
+  if (activeStage) {
+    ensureToppingDebugStage().setLayout(toppingDebugMode, toppingDebugFilter, floatAirRaspberry);
+  } else if (toppingDebugStage) {
+    toppingDebugStage.setLayout('off', toppingDebugFilter, false);
+  }
+
+  const hidePopsicle = toppingDebugMode === 'outside';
+  if (fruitAssembly) fruitAssembly.group.visible = !hidePopsicle;
+  if (iceSystem) {
+    iceSystem.iceMesh.visible = !hidePopsicle;
+    iceSystem.backZMesh.visible = !hidePopsicle;
+  }
+  if (waterDrops) waterDrops.pendantGroup.visible = !hidePopsicle;
+  orbit.minDistance = toppingDebugMode !== 'off' ? 1.35 : 3.2;
+}
+
+function applyToppingDebugState(syncRecipe = true) {
+  if (syncRecipe) {
+    if (toppingDebugMode === 'both' || toppingDebugMode === 'inside') {
+      if (!savedNormalRecipe) {
+        savedNormalRecipe = {
+          base: currentRecipe.base,
+          flavors: [...currentRecipe.flavors],
+          toppings: [...currentRecipe.toppings],
+        };
+      }
+      const nextToppings: ToppingId[] =
+        toppingDebugFilter === 'all' ? TOPPING_LIST.map((t) => t.id) : [toppingDebugFilter];
+      const nextFlavors: FlavorId[] =
+        toppingDebugFilter === 'raspberry'
+          ? ['raspberry']
+          : toppingDebugFilter === 'blueberry'
+            ? ['blueberry']
+            : toppingDebugFilter === 'shaved-lemon'
+              ? ['lemon']
+              : currentRecipe.flavors.length > 0
+                ? currentRecipe.flavors
+                : ['strawberry'];
+      applyRecipe({ base: currentRecipe.base, flavors: nextFlavors, toppings: nextToppings }, false);
+    } else if (toppingDebugMode === 'off' && savedNormalRecipe) {
+      const restore = savedNormalRecipe;
+      savedNormalRecipe = null;
+      applyRecipe(restore, false);
+    }
+  }
+  applyToppingDebugVisibility();
+  renderDirty = true;
+}
+
 btnCustomize.addEventListener('click', () => {
-  const open = customizePanel.hidden;
-  customizePanel.hidden = !open;
-  btnCustomize.setAttribute('aria-expanded', String(open));
-  if (open && !settingsPanel.hidden) {
-    settingsPanel.hidden = true;
-    btnSettings.setAttribute('aria-expanded', 'false');
-  }
-});
-
-btnCustRandom.addEventListener('click', () => {
-  const pick = <T,>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)];
-  const base: BaseKind = Math.random() < 0.45 ? 'coconut' : 'water';
-  const flavorCount = base === 'coconut' && Math.random() < 0.28 ? 0 : Math.random() < 0.55 ? 2 : 1;
-  const flavors: FlavorId[] = [];
-  while (flavors.length < flavorCount) {
-    const f = pick(FLAVOR_LIST).id;
-    if (!flavors.includes(f)) flavors.push(f);
-  }
-  const toppingCount = Math.random() < 0.16 ? 0 : Math.random() < 0.52 ? 1 : 2;
-  const toppings: ToppingId[] = [];
-  while (toppings.length < toppingCount) {
-    const t = pick(TOPPING_LIST).id;
-    if (!toppings.includes(t)) toppings.push(t);
-  }
-  applyRecipe({ base, flavors, toppings });
-});
-
-btnCustReset.addEventListener('click', () => {
-  applyRecipe({
-    base: DEFAULT_RECIPE.base,
-    flavors: [...DEFAULT_RECIPE.flavors],
-    toppings: [...DEFAULT_RECIPE.toppings],
-  });
-});
-
-btnSettings.addEventListener('click', () => {
-  const open = settingsPanel.hidden;
-  settingsPanel.hidden = !open;
-  btnSettings.setAttribute('aria-expanded', String(open));
-  if (open && !customizePanel.hidden) {
-    customizePanel.hidden = true;
-    btnCustomize.setAttribute('aria-expanded', 'false');
-  }
-});
-
-slMelt.addEventListener('input', () => {
-  syncSystemsToMelt(Number(slMelt.value));
-  valMelt.textContent = meltState.melt.toFixed(2);
-});
-
-slSpeed.addEventListener('input', () => {
-  simParams.speed = Number(slSpeed.value);
-  valSpeed.textContent = `${simParams.speed.toFixed(1)}×`;
-  savePersistedSettings();
-});
-
-slTurntable.addEventListener('input', () => {
-  simParams.turntable = Number(slTurntable.value);
-  valTurntable.textContent = simParams.turntable <= 0.001 ? 'Off' : simParams.turntable.toFixed(2);
-  savePersistedSettings();
-});
-
-slFrost.addEventListener('input', () => {
-  simParams.frost = Number(slFrost.value);
-  valFrost.textContent = simParams.frost.toFixed(2);
-  if (iceSystem) iceSystem.uniforms.uFrost.value = simParams.frost;
-  savePersistedSettings();
-  renderDirty = true;
-});
-
-slBubbles.addEventListener('input', () => {
-  simParams.bubbles = Number(slBubbles.value);
-  valBubbles.textContent = simParams.bubbles.toFixed(2);
-  if (iceSystem) iceSystem.update(meltState, simParams.bubbles);
-  savePersistedSettings();
-  renderDirty = true;
-});
-
-selDrops.addEventListener('change', () => {
-  const mode = selDrops.value as DropMode;
-  currentDropMode = mode;
-  waterDrops?.setMode(mode);
-  if (iceSystem && waterDrops && liquidFilm) {
-    waterDrops.update(meltState, iceSystem, liquidFilm, 0, simParams.speed);
-  }
-  savePersistedSettings();
-  renderDirty = true;
-});
-
-selFall.addEventListener('change', () => {
-  currentFallMode = selFall.value as FallFocusMode;
-  if (currentFallMode === 'off') fallFocusBlend = 0;
-  savePersistedSettings();
+  setCustomizeOpen(customizeStudio.hidden);
 });
 
 function applyDropDebug(partial: Partial<DropDebugParams>, forceRepack = false, persist = true) {
@@ -1596,63 +1777,8 @@ function applyDropDebug(partial: Partial<DropDebugParams>, forceRepack = false, 
   if (persist) {
     savePersistedSettings();
   }
-  syncWorkbenchUI();
   renderDirty = true;
 }
-
-for (const c of dropControls) {
-  c.input.addEventListener('input', () => {
-    const val = Number(c.input.value);
-    applyDropDebug({ [c.key]: val }, Boolean(c.repack));
-  });
-}
-
-btnDropReset.addEventListener('click', (e) => {
-  e.preventDefault();
-  e.stopPropagation();
-  applyDropDebug({ ...DEFAULT_DROP_DEBUG }, true);
-});
-
-let copyFlashTimer: number | null = null;
-btnSettingsCopy.addEventListener('click', () => {
-  const json = JSON.stringify(serializeSettings(), null, 2);
-  void copyTextToClipboard(json).then((ok) => {
-    btnSettingsCopy.textContent = ok ? 'Copied' : 'Failed';
-    if (copyFlashTimer !== null) window.clearTimeout(copyFlashTimer);
-    copyFlashTimer = window.setTimeout(() => {
-      btnSettingsCopy.textContent = 'Copy';
-      copyFlashTimer = null;
-    }, 1400);
-  });
-});
-
-function factoryResetSettings() {
-  clearPersistedSettings();
-  simParams.speed = DEFAULT_SIM_PARAMS.speed;
-  simParams.turntable = DEFAULT_SIM_PARAMS.turntable;
-  simParams.frost = DEFAULT_SIM_PARAMS.frost;
-  simParams.bubbles = DEFAULT_SIM_PARAMS.bubbles;
-  currentDropMode = DEFAULT_DROP_MODE;
-  currentFallMode = DEFAULT_FALL_MODE;
-  fallFocusBlend = 0;
-  Object.assign(dropDebug, DEFAULT_DROP_DEBUG);
-  meltState.bottomPool = dropDebug.bottomPool;
-  waterDrops?.setMode(currentDropMode);
-  waterDrops?.setDebugParams(dropDebug);
-  if (iceSystem) {
-    iceSystem.uniforms.uFrost.value = simParams.frost;
-    iceSystem.update(meltState, simParams.bubbles, true);
-  }
-  if (iceSystem && waterDrops && liquidFilm) {
-    waterDrops.update(meltState, iceSystem, liquidFilm, 0, simParams.speed);
-  }
-  syncWorkbenchUI();
-  renderDirty = true;
-}
-
-btnSettingsReset.addEventListener('click', () => {
-  factoryResetSettings();
-});
 
 window.addEventListener('keydown', (e) => {
   // Never hijack browser shortcuts (Cmd/Ctrl/Alt+R/N/C/etc.)
@@ -1667,14 +1793,7 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   if (e.key === 'Escape') {
-    if (!customizePanel.hidden) {
-      customizePanel.hidden = true;
-      btnCustomize.setAttribute('aria-expanded', 'false');
-    }
-    if (!settingsPanel.hidden) {
-      settingsPanel.hidden = true;
-      btnSettings.setAttribute('aria-expanded', 'false');
-    }
+    if (!customizeStudio.hidden) setCustomizeOpen(false);
     return;
   }
   if (e.code === 'Space') {
@@ -1689,10 +1808,13 @@ window.addEventListener('keydown', (e) => {
   } else if (e.key === 'n' || e.key === 'N') {
     buildPopsicle(currentSeed + 1, DEFAULT_INITIAL_MELT);
   } else if (e.key === 'c' || e.key === 'C') {
-    if (showSettings) btnCustomize.click();
+    setCustomizeOpen(customizeStudio.hidden);
   } else if (e.key >= '1' && e.key <= '9') {
     const preset = POPSICLE_PRESETS[Number(e.key) - 1];
-    if (preset) applyPreset(preset);
+    if (preset) {
+      applyPreset(preset);
+      expandPresetDock(1800);
+    }
   }
 });
 
@@ -1763,7 +1885,7 @@ function renderSeparableBlur(
 }
 
 // === NEST-STYLE WIREFRAME LOADING DRAWING & SMOOTH REVEAL ===
-const REVEAL_DURATION = 1.6; // seconds (smoothstep crossfade from wireframe drawing into photorealistic picture)
+const REVEAL_DURATION = isMobile ? 1.0 : 1.45; // seconds (smoothstep crossfade from wireframe drawing into photorealistic picture)
 const holdLoader = params.has('loader');
 let reveal = 0;
 let revealing = false;
@@ -1848,11 +1970,10 @@ function createWireLoader(seed: number, startMelt: number): WireLoader {
   const topY = POPSICLE.stickTopY;
   const botY = POPSICLE.stickBottomY;
   const stickShape = new THREE.Shape();
-  stickShape.moveTo(-hw, botY);
-  stickShape.lineTo(hw, botY);
+  stickShape.absarc(0, botY + hw, hw, Math.PI, Math.PI * 2, false);
   stickShape.lineTo(hw, topY - hw);
   stickShape.absarc(0, topY - hw, hw, 0, Math.PI, false);
-  stickShape.lineTo(-hw, botY);
+  stickShape.closePath();
   const stickDepth = POPSICLE.stickDepth * 0.62;
   const occludeStickGeo = new THREE.ExtrudeGeometry(stickShape, {
     depth: stickDepth,
@@ -1873,12 +1994,26 @@ function createWireLoader(seed: number, startMelt: number): WireLoader {
     polygonOffsetUnits: 1,
   });
   const lineMat = new THREE.LineBasicMaterial({ color: 0xffffff });
+  const stickXrayMat = new THREE.LineBasicMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0.68,
+    depthWrite: false,
+  });
 
   const occludeScene = new THREE.Scene();
   occludeScene.add(new THREE.Mesh(occludeIceGeo, hideMat), new THREE.Mesh(occludeStickGeo, hideMat));
 
   const lineScene = new THREE.Scene();
   lineScene.add(new THREE.LineSegments(iceLinesGeo, lineMat), new THREE.LineSegments(stickEdgesGeo, lineMat));
+
+  // Second pass reveals the embedded upper birch stick cleanly THROUGH the translucent popsicle wireframe
+  // while still self-occluding the stick's own back edges cleanly from any 360° orbit angle!
+  const stickOccludeScene = new THREE.Scene();
+  stickOccludeScene.add(new THREE.Mesh(occludeStickGeo, hideMat));
+
+  const stickXrayScene = new THREE.Scene();
+  stickXrayScene.add(new THREE.LineSegments(stickEdgesGeo, stickXrayMat));
 
   return {
     draw(cam: THREE.Camera) {
@@ -1888,6 +2023,10 @@ function createWireLoader(seed: number, startMelt: number): WireLoader {
       renderer.clear(true, true, false);
       renderer.render(occludeScene, cam);
       renderer.render(lineScene, cam);
+      // Clear depth only so the embedded stick renders softly through the ice grid without erasing front lines
+      renderer.clear(false, true, false);
+      renderer.render(stickOccludeScene, cam);
+      renderer.render(stickXrayScene, cam);
     },
     dispose() {
       occludeIceGeo.dispose();
@@ -1896,6 +2035,7 @@ function createWireLoader(seed: number, startMelt: number): WireLoader {
       stickEdgesGeo.dispose();
       hideMat.dispose();
       lineMat.dispose();
+      stickXrayMat.dispose();
     },
   };
 }
@@ -1917,7 +2057,19 @@ function renderPicturePasses() {
   const gl = renderer.getContext();
 
   // Keep studio key lights & rear lightbox locked to the viewer's azimuth so 360° turntable stays evenly backlit!
-  solidLights.rotation.y = Math.atan2(camera.position.x - orbit.target.x, camera.position.z - orbit.target.z);
+  const camAzimuth = Math.atan2(camera.position.x - orbit.target.x, camera.position.z - orbit.target.z);
+  solidLights.rotation.y = camAzimuth;
+
+  // Synchronize grazing side-back key light & raspberry side-translucency direction!
+  // In Topping Debug View, anchor in world space at `toppingDebugLightDeg` so orbiting sweeps around the side beam;
+  // in normal popsicle view, lock at -112° relative to the camera so exposed raspberries always catch dramatic side light!
+  const sideAz =
+    toppingDebugMode !== 'off' || floatAirRaspberry
+      ? (toppingDebugLightDeg * Math.PI) / 180
+      : camAzimuth + (-112 * Math.PI) / 180;
+  RASPBERRY_LIGHT_UNIFORMS.uSideLightDir.value.set(Math.sin(sideAz), 0.24, Math.cos(sideAz)).normalize();
+  sideKeyLight.position.copy(RASPBERRY_LIGHT_UNIFORMS.uSideLightDir.value).multiplyScalar(4.0);
+  sideKeyLight.intensity = toppingDebugMode !== 'off' ? 1.75 : 1.25;
 
   // Sync camera.matrixWorldInverse after turntable/setCamera lookAt() before projecting the studio halo!
   camera.updateMatrixWorld();
@@ -1925,6 +2077,16 @@ function renderPicturePasses() {
   // Project popsicle center into screen UV so studio lightbox halo tracks subtly when orbiting!
   _centerProj.set(0, 0.08, 0).project(camera);
   backdropUniforms.uHaloCenter.value.set(_centerProj.x * 0.5 + 0.5, _centerProj.y * 0.5 + 0.5);
+
+  // Fast direct studio render when inspecting toppings strictly outside the ice!
+  if (toppingDebugMode === 'outside') {
+    renderer.setRenderTarget(compositeRT);
+    renderer.setClearColor(clearColorDark, 1);
+    renderer.clear(true, true, false);
+    renderer.render(backdropScene, fsCam);
+    renderer.render(solidScene, camera);
+    return;
+  }
 
   // --- PASS 1: Back-Face Ice Camera Depth (measures exact optical slab thickness from any 3D angle!) ---
   renderer.setRenderTarget(backIceZRT);
@@ -2112,7 +2274,8 @@ function tick(now: number) {
     updatePointerWorld(pendingPointerX, pendingPointerY);
   }
 
-  const dt = paused ? 0 : rawDt;
+  // Pause ambient melting while Customize studio is open so the popsicle stays fresh & lightly frosted while editing!
+  const dt = paused || !customizeStudio.hidden ? 0 : rawDt;
 
   // Advance smooth NEST-style crossfade from wireframe drawing into the warmed photorealistic popsicle!
   if (revealing && reveal < 1) {
@@ -2128,7 +2291,12 @@ function tick(now: number) {
   const targetHeat = warmingActive ? (pointerPressed ? 1.0 : 0.42) : 0.0;
   meltState.pointerHeat += (targetHeat - meltState.pointerHeat) * Math.min(1, rawDt * 8.0);
 
-  if (dt > 0 && reveal >= 0.85 && fruitAssembly && iceSystem && waterDrops && liquidFilm) {
+  if (dt > 0 && toppingDebugStage && toppingDebugStage.group.visible && toppingDebugSpin) {
+    toppingDebugStage.update(dt, true);
+    renderDirty = true;
+  }
+
+  if (dt > 0 && reveal >= 0.85 && toppingDebugMode !== 'outside' && fruitAssembly && iceSystem && waterDrops && liquidFilm) {
     const { meltScale, fluidScale, fruitScale } = computeFallDilation(dt, fruitAssembly.hasFallingFruitInView());
     const dtMelt = dt * meltScale;
     const dtFluid = dt * fluidScale;
@@ -2154,11 +2322,6 @@ function tick(now: number) {
     fruitAssembly.update(meltState, dtFruit, liquidFilm.stickWetness);
     waterDrops.update(meltState, iceSystem, liquidFilm, dtFluid, simParams.speed);
     renderDirty = true;
-
-    if (showSettings && !settingsPanel.hidden) {
-      slMelt.value = meltState.melt.toFixed(3);
-      valMelt.textContent = meltState.melt.toFixed(2);
-    }
 
     // Superslow museum-grade 360° studio turntable (~2.3°/s at 0.20 default; yields only to right-drag or fruit grab!)
     if (
@@ -2205,11 +2368,22 @@ function tick(now: number) {
 // === RESIZE HANDLER ===
 window.addEventListener('resize', () => {
   const vp = safeViewportSize();
+  const nextMobileFraming = syncBaseFraming(vp);
+  if (nextMobileFraming !== lastMobileFraming) {
+    lastMobileFraming = nextMobileFraming;
+    camera.position.copy(BASE_CAM_POS);
+    orbit.target.copy(BASE_TARGET);
+    camera.lookAt(BASE_TARGET);
+    orbit.update();
+    appliedMeltZoom = 0;
+    applyMeltCameraZoom(0, true);
+  }
   camera.aspect = vp.w / vp.h;
   camera.updateProjectionMatrix();
   renderer.setPixelRatio(targetPixelRatio());
   renderer.setSize(vp.w, vp.h);
   rebuildRenderTargets();
+  updatePresetPeekShift();
   renderDirty = true;
 });
 
@@ -2258,9 +2432,8 @@ async function warmCompileAndTextures() {
   queueCompile(displayScene, fsCam, null);
   renderer.setRenderTarget(prevRT);
   await Promise.all(compileJobs);
-  await nextFrame();
 
-  // Upload all procedural 2D & 3D textures one per frame so GPU uploads never hitch the live wireframe!
+  // Batch procedural 2D & 3D texture uploads (6 per frame) so mobile boot finishes fast without stalling the wireframe!
   const textures = new Set<THREE.Texture>();
   const addUploadTex = (t: unknown) => {
     if (t instanceof THREE.Texture && !(t as { isRenderTargetTexture?: boolean }).isRenderTargetTexture) {
@@ -2292,31 +2465,29 @@ async function warmCompileAndTextures() {
   collectSceneTextures(solidScene);
   collectSceneTextures(iceScene);
   collectSceneTextures(dropsScene);
+  let uploaded = 0;
   for (const t of textures) {
-    await nextFrame();
     renderer.initTexture(t);
+    uploaded++;
+    if (uploaded % 6 === 0) await nextFrame();
   }
 
   // Prime all offscreen picture passes once unseen into compositeRT so Metal/ANGLE finishes pipeline state before reveal!
   await nextFrame();
   renderPicturePasses();
-  await nextFrame();
 }
 
 async function bootAsync() {
-  // Let the browser paint at least 2 live wireframe frames first so the page stands on the drawing, never blank!
+  // Let the browser paint 1 live wireframe frame immediately so the page stands on the drawing, never blank!
   renderDirty = true;
-  await nextFrame();
   await nextFrame();
 
   // ?loader: stay on the wireframe drawing for inspection
   if (holdLoader) return;
 
   try {
-    // Spread heavy procedural CPU work (studio env, 48³ 3D noise, procedural fruit/wood textures, ice & drops) across frames
+    // Spread heavy procedural CPU work (studio env, 3D noise, procedural fruit/wood textures, ice & drops) across frames
     ensureStudioEnv();
-    await nextFrame();
-
     getSharedNoise3DTexture();
     await nextFrame();
 
@@ -2332,12 +2503,17 @@ async function bootAsync() {
 
   revealing = true;
   document.body.classList.remove('loading');
+  updatePresetPeekShift();
+  schedulePresetDockHide(2600);
   renderDirty = true;
 }
 
 if (paused && !holdLoader) {
   // Deterministic paused boot (headless verification & preset icon prerendering): ready on frame 0!
   buildPopsicle(currentSeed, initialMelt);
+  if (toppingDebugMode !== 'off' || floatAirRaspberry) {
+    applyToppingDebugState(true);
+  }
   reveal = 1;
   revealing = true;
   endWire();
@@ -2347,7 +2523,11 @@ if (paused && !holdLoader) {
   // Interactive boot: instant wireframe drawing + staggered GPU warm-up + smooth 1.6s reveal!
   applyMeltCameraZoom(0, true);
   renderFrame();
-  void bootAsync();
+  void bootAsync().then(() => {
+    if (toppingDebugMode !== 'off' || floatAirRaspberry) {
+      applyToppingDebugState(true);
+    }
+  });
 }
 
 // Expose deterministic inspection API for Playwright verification captures
@@ -2425,7 +2605,6 @@ if (paused && !holdLoader) {
   },
   setDropMode(mode: DropMode) {
     currentDropMode = mode;
-    selDrops.value = mode;
     waterDrops?.setMode(mode);
     if (iceSystem && waterDrops && liquidFilm) {
       waterDrops.update(meltState, iceSystem, liquidFilm, 0, simParams.speed);
@@ -2434,7 +2613,6 @@ if (paused && !holdLoader) {
   },
   setFallMode(mode: FallFocusMode) {
     currentFallMode = mode;
-    selFall.value = mode;
     if (mode === 'off') fallFocusBlend = 0;
   },
   setDropDebug(partial: Partial<DropDebugParams>) {
@@ -2478,6 +2656,30 @@ if (paused && !holdLoader) {
         };
       })
       .filter((item) => item.visible && (item.detached || item.exposure >= 0.28));
+  },
+  setToppingDebug(opts: {
+    mode?: ToppingDebugMode;
+    filter?: ToppingDebugFilter;
+    airRaspberry?: boolean;
+    lightDeg?: number;
+    transBoost?: number;
+    spin?: boolean;
+    openPanel?: boolean;
+  }) {
+    if (opts.mode !== undefined) toppingDebugMode = opts.mode;
+    if (opts.filter !== undefined) toppingDebugFilter = opts.filter;
+    if (opts.airRaspberry !== undefined) floatAirRaspberry = opts.airRaspberry;
+    if (opts.lightDeg !== undefined) toppingDebugLightDeg = opts.lightDeg;
+    if (opts.transBoost !== undefined) RASPBERRY_LIGHT_UNIFORMS.uTransBoost.value = opts.transBoost;
+    if (opts.spin !== undefined) toppingDebugSpin = opts.spin;
+    applyToppingDebugState(true);
+    renderFrame();
+  },
+  setDockPeeking(on: boolean) {
+    setPresetDockPeeking(on);
+  },
+  setCustomizeOpen(on: boolean) {
+    setCustomizeOpen(on);
   },
   getState() {
     return {
