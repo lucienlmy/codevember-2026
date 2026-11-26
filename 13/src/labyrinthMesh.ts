@@ -23,12 +23,12 @@ import {
   type VertexPost,
   type WallSlot,
 } from './maze';
+import { createLedFilmDisplay } from './ledFilm';
 import {
   createArrowGlyphTexture,
   createDecalLabelTexture,
   createLedHaloTexture,
   createMatteGrainTextures,
-  createMetalBallTexture,
   createNeonTubeTexture,
   createPadlockGlyphTexture,
   createPlasticScratchTextures,
@@ -99,6 +99,8 @@ export interface LabyrinthRig {
   applyPoleShutters: (northOpen: number, southOpen: number) => void;
   setReadyHole: (shutterId: number, finishReady: boolean, dwell?: number, toggleId?: number) => void;
   setLevelVisuals: (level: LevelConfig) => void;
+  triggerLedIntro: () => void;
+  clearLedTape: () => void;
   updateLeds: (
     time: number,
     clearedMask: boolean[],
@@ -165,15 +167,46 @@ function mergeGeometries(geos: THREE.BufferGeometry[]): THREE.BufferGeometry {
 }
 
 /**
- * Builds a solid curved spherical shell tile for a cell with real thickness (R_FLOOR -> R_FLOOR_INNER).
+ * Appends a flat-shaded side-wall quad with its own split vertices & exact outward normal
+ * so side-wall thickness NEVER bends the smooth spherical normals of the floor surface!
+ */
+function pushSplitSideQuad(
+  positions: number[],
+  normals: number[],
+  uvs: number[],
+  indices: number[],
+  ax: number, ay: number, az: number,
+  bx: number, by: number, bz: number,
+  cx: number, cy: number, cz: number,
+  dx: number, dy: number, dz: number,
+) {
+  const e1x = bx - ax, e1y = by - ay, e1z = bz - az;
+  const e2x = cx - ax, e2y = cy - ay, e2z = cz - az;
+  let nx = e1y * e2z - e1z * e2y;
+  let ny = e1z * e2x - e1x * e2z;
+  let nz = e1x * e2y - e1y * e2x;
+  const len = Math.hypot(nx, ny, nz) || 1;
+  nx /= len; ny /= len; nz /= len;
+
+  const base = positions.length / 3;
+  positions.push(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz);
+  normals.push(nx, ny, nz, nx, ny, nz, nx, ny, nz, nx, ny, nz);
+  uvs.push(0, 0, 1, 0, 0, 1, 1, 1);
+  indices.push(base, base + 1, base + 2, base + 1, base + 3, base + 2);
+}
+
+/**
+ * Builds a solid curved spherical shell tile for a cell with real thickness (R_FLOOR -> R_FLOOR_INNER)
+ * and exact analytical radial sphere normals (zero embossed/pillowed tile-edge normal bending!).
  */
 function buildSolidCellShell(cell: Cell): THREE.BufferGeometry {
   const isNorthPole = cell.band === 0;
   const isSouthPole = cell.band === BANDS.length - 1;
-  const segPhi = isNorthPole || isSouthPole ? 8 : 8;
+  const segPhi = 8;
   const segTheta = isNorthPole || isSouthPole ? 36 : 8;
 
   const positions: number[] = [];
+  const normals: number[] = [];
   const uvs: number[] = [];
   const indices: number[] = [];
   const v = new THREE.Vector3();
@@ -183,12 +216,12 @@ function buildSolidCellShell(cell: Cell): THREE.BufferGeometry {
   const t0 = cell.thetaMin;
   const t1 = cell.thetaMax;
 
-  // Outer surface (R_FLOOR) + Inner underside surface (R_FLOOR_INNER)
   const stride = segTheta + 1;
   const layerVerts = (segPhi + 1) * stride;
 
   for (let layer = 0; layer < 2; layer++) {
     const r = layer === 0 ? R_FLOOR : R_FLOOR_INNER;
+    const nSign = layer === 0 ? 1 : -1;
     for (let ip = 0; ip <= segPhi; ip++) {
       const fp = ip / segPhi;
       const phi = phi0 + (phi1 - phi0) * fp;
@@ -197,21 +230,20 @@ function buildSolidCellShell(cell: Cell): THREE.BufferGeometry {
         const theta = t0 + (t1 - t0) * ft;
         sphToDir(phi, theta, v);
         positions.push(v.x * r, v.y * r, v.z * r);
+        normals.push(v.x * nSign, v.y * nSign, v.z * nSign);
         uvs.push(ft * 2, fp * 2);
       }
     }
   }
 
-  // Outer faces (outward normal: +phi x +theta? Wait: at phi=PI/2, theta=0: d/dphi=(0,-1,0), d/dtheta=(0,0,1) => d/dtheta x d/dphi = (1,0,0) = +r!)
   for (let ip = 0; ip < segPhi; ip++) {
     for (let it = 0; it < segTheta; it++) {
       const a = ip * stride + it;
-      const b = a + 1; // +theta
-      const c = (ip + 1) * stride + it; // +phi
+      const b = a + 1;
+      const c = (ip + 1) * stride + it;
       const d = c + 1;
       indices.push(a, b, c, b, d, c);
 
-      // Inner underside faces (inward normal)
       const ia = layerVerts + a;
       const ib = layerVerts + b;
       const ic = layerVerts + c;
@@ -220,83 +252,90 @@ function buildSolidCellShell(cell: Cell): THREE.BufferGeometry {
     }
   }
 
-  // Side walls along cell perimeter (gives crisp physical shell thickness where solid panels border windows!)
+  // Split-vertex perimeter side walls (only needed for thickness edges, zero normal bleed onto floor!)
   if (!isNorthPole && !isSouthPole) {
-    // North edge (ip = 0)
-    for (let it = 0; it < segTheta; it++) {
-      const o0 = it;
-      const o1 = it + 1;
+    const pushEdge = (o0: number, o1: number, flip: boolean) => {
       const i0 = layerVerts + o0;
       const i1 = layerVerts + o1;
-      indices.push(o0, i0, o1, o1, i0, i1);
-    }
-    // South edge (ip = segPhi)
+      const a = flip ? o0 : o1;
+      const b = flip ? o1 : o0;
+      const c = flip ? i0 : i1;
+      const d = flip ? i1 : i0;
+      pushSplitSideQuad(
+        positions, normals, uvs, indices,
+        positions[a * 3], positions[a * 3 + 1], positions[a * 3 + 2],
+        positions[b * 3], positions[b * 3 + 1], positions[b * 3 + 2],
+        positions[c * 3], positions[c * 3 + 1], positions[c * 3 + 2],
+        positions[d * 3], positions[d * 3 + 1], positions[d * 3 + 2],
+      );
+    };
+    for (let it = 0; it < segTheta; it++) pushEdge(it, it + 1, false);
     const rowOff = segPhi * stride;
-    for (let it = 0; it < segTheta; it++) {
-      const o0 = rowOff + it;
-      const o1 = rowOff + it + 1;
-      const i0 = layerVerts + o0;
-      const i1 = layerVerts + o1;
-      indices.push(o0, o1, i0, o1, i1, i0);
-    }
-    // West edge (it = 0)
-    for (let ip = 0; ip < segPhi; ip++) {
-      const o0 = ip * stride;
-      const o1 = (ip + 1) * stride;
-      const i0 = layerVerts + o0;
-      const i1 = layerVerts + o1;
-      indices.push(o0, o1, i0, o1, i1, i0);
-    }
-    // East edge (it = segTheta)
-    for (let ip = 0; ip < segPhi; ip++) {
-      const o0 = ip * stride + segTheta;
-      const o1 = (ip + 1) * stride + segTheta;
-      const i0 = layerVerts + o0;
-      const i1 = layerVerts + o1;
-      indices.push(o0, i0, o1, o1, i0, i1);
-    }
+    for (let it = 0; it < segTheta; it++) pushEdge(rowOff + it, rowOff + it + 1, true);
+    for (let ip = 0; ip < segPhi; ip++) pushEdge(ip * stride, (ip + 1) * stride, true);
+    for (let ip = 0; ip < segPhi; ip++) pushEdge(ip * stride + segTheta, (ip + 1) * stride + segTheta, false);
   }
 
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
   geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
   geo.setIndex(indices);
-  geo.computeVertexNormals();
   return geo;
 }
 
 /**
- * Builds a window frame bezel (opaque perimeter margin around the cell) + clear flush polycarbonate window pane.
+ * Builds a window frame bezel (opaque perimeter margin around the cell), sculpted 45° recessed bevel chamfer,
+ * hairline perimeter panel seam, and recessed clear polycarbonate window pane.
  */
-function buildWindowCellParts(cell: Cell): { frameGeo: THREE.BufferGeometry; paneGeo: THREE.BufferGeometry } {
-  const marginPhi = (cell.phiMax - cell.phiMin) * 0.145;
-  const marginTheta = (cell.thetaMax - cell.thetaMin) * 0.145;
+function buildWindowCellParts(cell: Cell): {
+  frameGeo: THREE.BufferGeometry;
+  paneGeo: THREE.BufferGeometry;
+  chamferGeo: THREE.BufferGeometry;
+  seamGeo: THREE.BufferGeometry;
+} {
+  const marginPhi = (cell.phiMax - cell.phiMin) * 0.155;
+  const marginTheta = (cell.thetaMax - cell.thetaMin) * 0.155;
   const pMin = cell.phiMin;
   const pMax = cell.phiMax;
   const tMin = cell.thetaMin;
   const tMax = cell.thetaMax;
+  // Inner glass opening
   const pIn0 = pMin + marginPhi;
   const pIn1 = pMax - marginPhi;
   const tIn0 = tMin + marginTheta;
   const tIn1 = tMax - marginTheta;
 
+  // 45° chamfer lip width (scaled by sin(phi) in longitude so angular width stays physically uniform)
+  const sinMid = Math.max(0.28, Math.sin(cell.centerPhi));
+  const chArc = 0.0082;
+  const chPhi = chArc;
+  const chTheta = chArc / sinMid;
+  const pCut0 = pIn0 - chPhi;
+  const pCut1 = pIn1 + chPhi;
+  const tCut0 = tIn0 - chTheta;
+  const tCut1 = tIn1 + chTheta;
+
   const v = new THREE.Vector3();
 
-  // Helper for rectangular solid bezel strip with thickness
+  // Helper for rectangular solid bezel strip with thickness & exact split spherical normals
   const makeStrip = (aPhi: number, bPhi: number, aTheta: number, bTheta: number, sp: number, st: number) => {
     const pos: number[] = [];
+    const norm: number[] = [];
     const uv: number[] = [];
     const idx: number[] = [];
     const stride = st + 1;
     const lv = (sp + 1) * stride;
     for (let layer = 0; layer < 2; layer++) {
       const r = layer === 0 ? R_FLOOR : R_FLOOR_INNER;
+      const nSign = layer === 0 ? 1 : -1;
       for (let ip = 0; ip <= sp; ip++) {
         const phi = aPhi + ((bPhi - aPhi) * ip) / sp;
         for (let it = 0; it <= st; it++) {
           const theta = aTheta + ((bTheta - aTheta) * it) / st;
           sphToDir(phi, theta, v);
           pos.push(v.x * r, v.y * r, v.z * r);
+          norm.push(v.x * nSign, v.y * nSign, v.z * nSign);
           uv.push(it / st, ip / sp);
         }
       }
@@ -311,43 +350,166 @@ function buildWindowCellParts(cell: Cell): { frameGeo: THREE.BufferGeometry; pan
         idx.push(lv + a, lv + c, lv + b, lv + b, lv + c, lv + d);
       }
     }
-    // Inner & outer edges
-    for (let it = 0; it < st; it++) {
-      idx.push(it, lv + it, it + 1, it + 1, lv + it, lv + it + 1);
-      const r0 = sp * stride;
-      idx.push(r0 + it, r0 + it + 1, lv + r0 + it, r0 + it + 1, lv + r0 + it + 1, lv + r0 + it);
-    }
-    for (let ip = 0; ip < sp; ip++) {
-      const a = ip * stride;
-      const b = (ip + 1) * stride;
-      idx.push(a, b, lv + a, b, lv + b, lv + a);
-      const ae = a + st;
-      const be = b + st;
-      idx.push(ae, lv + ae, be, be, lv + ae, lv + be);
-    }
+    const pushEdge = (o0: number, o1: number, flip: boolean) => {
+      const i0 = lv + o0;
+      const i1 = lv + o1;
+      const a = flip ? o0 : o1;
+      const b = flip ? o1 : o0;
+      const c = flip ? i0 : i1;
+      const d = flip ? i1 : i0;
+      pushSplitSideQuad(
+        pos, norm, uv, idx,
+        pos[a * 3], pos[a * 3 + 1], pos[a * 3 + 2],
+        pos[b * 3], pos[b * 3 + 1], pos[b * 3 + 2],
+        pos[c * 3], pos[c * 3 + 1], pos[c * 3 + 2],
+        pos[d * 3], pos[d * 3 + 1], pos[d * 3 + 2],
+      );
+    };
+    for (let it = 0; it < st; it++) pushEdge(it, it + 1, false);
+    const r0 = sp * stride;
+    for (let it = 0; it < st; it++) pushEdge(r0 + it, r0 + it + 1, true);
+    for (let ip = 0; ip < sp; ip++) pushEdge(ip * stride, (ip + 1) * stride, true);
+    for (let ip = 0; ip < sp; ip++) pushEdge(ip * stride + st, (ip + 1) * stride + st, false);
+
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('normal', new THREE.Float32BufferAttribute(norm, 3));
     g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
     g.setIndex(idx);
-    g.computeVertexNormals();
     return g;
   };
 
-  // 4 frame bezel strips around the clear window opening
+  // 4 frame bezel strips around the chamfered window opening
   const frameGeo = mergeGeometries([
-    makeStrip(pMin, pIn0, tMin, tMax, 2, 6),
-    makeStrip(pIn1, pMax, tMin, tMax, 2, 6),
-    makeStrip(pIn0, pIn1, tMin, tIn0, 5, 2),
-    makeStrip(pIn0, pIn1, tIn1, tMax, 5, 2),
+    makeStrip(pMin, pCut0, tMin, tMax, 2, 6),
+    makeStrip(pCut1, pMax, tMin, tMax, 2, 6),
+    makeStrip(pCut0, pCut1, tMin, tCut0, 5, 2),
+    makeStrip(pCut0, pCut1, tCut1, tMax, 5, 2),
   ]);
 
-  // Flush clear polycarbonate window pane sitting cleanly inside the frame
+  // Sculpted 45° recessed chamfer bevel sloping cleanly from R_FLOOR down to the window pane + inner wall
+  const cPos: number[] = [];
+  const cNorm: number[] = [];
+  const cUv: number[] = [];
+  const cIdx: number[] = [];
+  const rChamferTop = R_FLOOR;
+  const rChamferBot = R_FLOOR - 0.008;
+  const pA = new THREE.Vector3();
+  const pB = new THREE.Vector3();
+  const pC = new THREE.Vector3();
+  const pD = new THREE.Vector3();
+
+  const pushBevelEdge = (
+    outP0: number, outT0: number, outP1: number, outT1: number,
+    inP0: number, inT0: number, inP1: number, inT1: number,
+    segs: number,
+  ) => {
+    for (let s = 0; s < segs; s++) {
+      const f0 = s / segs;
+      const f1 = (s + 1) / segs;
+      const op0 = outP0 + (outP1 - outP0) * f0;
+      const ot0 = outT0 + (outT1 - outT0) * f0;
+      const op1 = outP0 + (outP1 - outP0) * f1;
+      const ot1 = outT0 + (outT1 - outT0) * f1;
+      const ip0 = inP0 + (inP1 - inP0) * f0;
+      const it0 = inT0 + (inT1 - inT0) * f0;
+      const ip1 = inP0 + (inP1 - inP0) * f1;
+      const it1 = inT0 + (inT1 - inT0) * f1;
+
+      sphToDir(op0, ot0, pA).multiplyScalar(rChamferTop);
+      sphToDir(op1, ot1, pB).multiplyScalar(rChamferTop);
+      sphToDir(ip0, it0, pC).multiplyScalar(rChamferBot);
+      sphToDir(ip1, it1, pD).multiplyScalar(rChamferBot);
+      pushSplitSideQuad(cPos, cNorm, cUv, cIdx, pA.x, pA.y, pA.z, pB.x, pB.y, pB.z, pC.x, pC.y, pC.z, pD.x, pD.y, pD.z);
+
+      // Inner vertical recess drop below glass lip down to R_FLOOR_INNER
+      sphToDir(ip0, it0, pA).multiplyScalar(rChamferBot);
+      sphToDir(ip1, it1, pB).multiplyScalar(rChamferBot);
+      sphToDir(ip0, it0, pC).multiplyScalar(R_FLOOR_INNER);
+      sphToDir(ip1, it1, pD).multiplyScalar(R_FLOOR_INNER);
+      pushSplitSideQuad(cPos, cNorm, cUv, cIdx, pA.x, pA.y, pA.z, pB.x, pB.y, pB.z, pC.x, pC.y, pC.z, pD.x, pD.y, pD.z);
+    }
+  };
+  // 4 mitered bevel walls (CCW around opening so bevel faces inward & upward catching studio key light!)
+  pushBevelEdge(pCut0, tCut0, pCut0, tCut1, pIn0, tIn0, pIn0, tIn1, 6); // North
+  pushBevelEdge(pCut0, tCut1, pCut1, tCut1, pIn0, tIn1, pIn1, tIn1, 6); // East
+  pushBevelEdge(pCut1, tCut1, pCut1, tCut0, pIn1, tIn1, pIn1, tIn0, 6); // South
+  pushBevelEdge(pCut1, tCut0, pCut0, tCut0, pIn1, tIn0, pIn0, tIn0, 6); // West
+
+  const chamferGeo = new THREE.BufferGeometry();
+  chamferGeo.setAttribute('position', new THREE.Float32BufferAttribute(cPos, 3));
+  chamferGeo.setAttribute('normal', new THREE.Float32BufferAttribute(cNorm, 3));
+  chamferGeo.setAttribute('uv', new THREE.Float32BufferAttribute(cUv, 2));
+  chamferGeo.setIndex(cIdx);
+
+  // Crisp flat hairline perimeter panel seam framing the window bezel (matching shutter collar seams!)
+  const sPos: number[] = [];
+  const sNorm: number[] = [];
+  const sUv: number[] = [];
+  const sIdx: number[] = [];
+  const rWinSeam = R_FLOOR + 0.00028;
+  const seamOff = 0.011;
+  const seamHalf = 0.00085;
+  const pushSeamRing = (offsetArc: number, halfW: number) => {
+    const oPhi = offsetArc;
+    const oTh = offsetArc / sinMid;
+    const hwP = halfW;
+    const hwT = halfW / sinMid;
+    const pOut0 = pCut0 - oPhi - hwP;
+    const pOut1 = pCut1 + oPhi + hwP;
+    const tOut0 = tCut0 - oTh - hwT;
+    const tOut1 = tCut1 + oTh + hwT;
+    const pInn0 = pCut0 - oPhi + hwP;
+    const pInn1 = pCut1 + oPhi - hwP;
+    const tInn0 = tCut0 - oTh + hwT;
+    const tInn1 = tCut1 + oTh - hwT;
+
+    const addSeamSide = (
+      aP0: number, aT0: number, aP1: number, aT1: number,
+      bP0: number, bT0: number, bP1: number, bT1: number,
+      segs: number,
+    ) => {
+      for (let s = 0; s < segs; s++) {
+        const f0 = s / segs;
+        const f1 = (s + 1) / segs;
+        sphToDir(aP0 + (aP1 - aP0) * f0, aT0 + (aT1 - aT0) * f0, pA);
+        sphToDir(aP0 + (aP1 - aP0) * f1, aT0 + (aT1 - aT0) * f1, pB);
+        sphToDir(bP0 + (bP1 - bP0) * f0, bT0 + (bT1 - bT0) * f0, pC);
+        sphToDir(bP0 + (bP1 - bP0) * f1, bT0 + (bT1 - bT0) * f1, pD);
+        const base = sPos.length / 3;
+        sPos.push(
+          pA.x * rWinSeam, pA.y * rWinSeam, pA.z * rWinSeam,
+          pB.x * rWinSeam, pB.y * rWinSeam, pB.z * rWinSeam,
+          pC.x * rWinSeam, pC.y * rWinSeam, pC.z * rWinSeam,
+          pD.x * rWinSeam, pD.y * rWinSeam, pD.z * rWinSeam,
+        );
+        sNorm.push(pA.x, pA.y, pA.z, pB.x, pB.y, pB.z, pC.x, pC.y, pC.z, pD.x, pD.y, pD.z);
+        sUv.push(f0, 0, f1, 0, f0, 1, f1, 1);
+        sIdx.push(base, base + 1, base + 2, base + 1, base + 3, base + 2);
+      }
+    };
+    addSeamSide(pOut0, tOut0, pOut0, tOut1, pInn0, tInn0, pInn0, tInn1, 6);
+    addSeamSide(pOut0, tOut1, pOut1, tOut1, pInn0, tInn1, pInn1, tInn1, 6);
+    addSeamSide(pOut1, tOut1, pOut1, tOut0, pInn1, tInn1, pInn1, tInn0, 6);
+    addSeamSide(pOut1, tOut0, pOut0, tOut0, pInn1, tInn0, pInn0, tInn0, 6);
+  };
+  // Outer architectural perimeter seam + delicate lip seam right along the chamfer edge
+  pushSeamRing(seamOff, seamHalf);
+  pushSeamRing(0.0005, 0.0006);
+
+  const seamGeo = new THREE.BufferGeometry();
+  seamGeo.setAttribute('position', new THREE.Float32BufferAttribute(sPos, 3));
+  seamGeo.setAttribute('normal', new THREE.Float32BufferAttribute(sNorm, 3));
+  seamGeo.setAttribute('uv', new THREE.Float32BufferAttribute(sUv, 2));
+  seamGeo.setIndex(sIdx);
+
+  // Recessed clear polycarbonate window pane sitting cleanly at the base of the 45° chamfer lip
   const seg = 6;
   const pPos: number[] = [];
   const pNorm: number[] = [];
   const pUv: number[] = [];
   const pIdx: number[] = [];
-  const rPane = R_FLOOR - 0.0025;
+  const rPane = R_FLOOR - 0.0072;
   for (let ip = 0; ip <= seg; ip++) {
     const phi = pIn0 + ((pIn1 - pIn0) * ip) / seg;
     for (let it = 0; it <= seg; it++) {
@@ -374,7 +536,7 @@ function buildWindowCellParts(cell: Cell): { frameGeo: THREE.BufferGeometry; pan
   paneGeo.setAttribute('uv', new THREE.Float32BufferAttribute(pUv, 2));
   paneGeo.setIndex(pIdx);
 
-  return { frameGeo, paneGeo };
+  return { frameGeo, paneGeo, chamferGeo, seamGeo };
 }
 
 /**
@@ -406,6 +568,7 @@ function buildPerforatedShutterCell(cell: Cell): THREE.BufferGeometry {
   const dir = new THREE.Vector3();
 
   const positions: number[] = [];
+  const normals: number[] = [];
   const uvs: number[] = [];
   const indices: number[] = [];
 
@@ -414,6 +577,7 @@ function buildPerforatedShutterCell(cell: Cell): THREE.BufferGeometry {
 
   for (let layer = 0; layer < 2; layer++) {
     const rad = layer === 0 ? R_FLOOR : R_FLOOR_INNER;
+    const nSign = layer === 0 ? 1 : -1;
     for (let ir = 0; ir <= segR; ir++) {
       const fr = ir / segR;
       for (let ia = 0; ia <= segA; ia++) {
@@ -421,7 +585,6 @@ function buildPerforatedShutterCell(cell: Cell): THREE.BufferGeometry {
         const ca = Math.cos(ang);
         const sa = Math.sin(ang);
 
-        // Inner circular hole edge
         pIn
           .copy(cDir)
           .multiplyScalar(cosHole)
@@ -429,7 +592,6 @@ function buildPerforatedShutterCell(cell: Cell): THREE.BufferGeometry {
           .addScaledVector(ty, sa * sinHole)
           .normalize();
 
-        // Outer square cell boundary mapped onto sphere
         const s = 1 / Math.max(Math.abs(ca), Math.abs(sa));
         const uSq = ca * s;
         const vSq = sa * s;
@@ -437,6 +599,7 @@ function buildPerforatedShutterCell(cell: Cell): THREE.BufferGeometry {
 
         dir.copy(pIn).lerp(pOut, fr).normalize();
         positions.push(dir.x * rad, dir.y * rad, dir.z * rad);
+        normals.push(dir.x * nSign, dir.y * nSign, dir.z * nSign);
         uvs.push(fr * ca * 0.5 + 0.5, fr * sa * 0.5 + 0.5);
       }
     }
@@ -445,13 +608,11 @@ function buildPerforatedShutterCell(cell: Cell): THREE.BufferGeometry {
   for (let ir = 0; ir < segR; ir++) {
     for (let ia = 0; ia < segA; ia++) {
       const a = ir * ringStride + ia;
-      const b = a + 1; // +angle (CCW viewed from outside)
-      const c = (ir + 1) * ringStride + ia; // +radial outward
+      const b = a + 1;
+      const c = (ir + 1) * ringStride + ia;
       const d = c + 1;
-      // (+r) x (+angle) = +cDir outward!
       indices.push(a, c, b, c, d, b);
 
-      // Inner underside (facing inward)
       const ia0 = layerVerts + a;
       const ib0 = layerVerts + b;
       const ic0 = layerVerts + c;
@@ -460,30 +621,34 @@ function buildPerforatedShutterCell(cell: Cell): THREE.BufferGeometry {
     }
   }
 
-  // Circular hole bore wall connecting outer ring (ir=0) to inner underside ring (ir=0) — faces inward toward hole center
-  for (let ia = 0; ia < segA; ia++) {
-    const o0 = ia;
-    const o1 = ia + 1;
-    const i0 = layerVerts + ia;
-    const i1 = layerVerts + ia + 1;
-    indices.push(o0, o1, i0, o1, i1, i0);
-  }
-
-  // Outer perimeter side walls connecting solid thickness cleanly to adjacent transparent window panels
-  const outerRow = segR * ringStride;
-  for (let ia = 0; ia < segA; ia++) {
-    const o0 = outerRow + ia;
-    const o1 = outerRow + ia + 1;
+  const pushRimEdge = (o0: number, o1: number, flip: boolean) => {
     const i0 = layerVerts + o0;
     const i1 = layerVerts + o1;
-    indices.push(o0, i0, o1, o1, i0, i1);
-  }
+    const a = flip ? o0 : o1;
+    const b = flip ? o1 : o0;
+    const c = flip ? i0 : i1;
+    const d = flip ? i1 : i0;
+    pushSplitSideQuad(
+      positions, normals, uvs, indices,
+      positions[a * 3], positions[a * 3 + 1], positions[a * 3 + 2],
+      positions[b * 3], positions[b * 3 + 1], positions[b * 3 + 2],
+      positions[c * 3], positions[c * 3 + 1], positions[c * 3 + 2],
+      positions[d * 3], positions[d * 3 + 1], positions[d * 3 + 2],
+    );
+  };
+
+  // Circular hole bore wall (split vertices so top floor stays dead-flat right up to the aperture!)
+  for (let ia = 0; ia < segA; ia++) pushRimEdge(ia, ia + 1, true);
+
+  // Outer perimeter thickness side walls (split vertices -> zero embossed edge normal bending!)
+  const outerRow = segR * ringStride;
+  for (let ia = 0; ia < segA; ia++) pushRimEdge(outerRow + ia, outerRow + ia + 1, false);
 
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
   geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
   geo.setIndex(indices);
-  geo.computeVertexNormals();
   return geo;
 }
 
@@ -858,7 +1023,7 @@ function buildWallColumnSeamGeometry(wall: WallSlot): THREE.BufferGeometry {
     wall.kind === 'lat'
       ? Math.abs(wall.thetaEnd - wall.thetaStart) * Math.sin(wall.phiStart)
       : Math.abs(wall.phiEnd - wall.phiStart);
-  const seamWidth = 0.0021;
+  const seamWidth = 0.00135;
 
   const positions: number[] = [];
   const indices: number[] = [];
@@ -929,87 +1094,118 @@ function buildWallColumnSeamGeometry(wall: WallSlot): THREE.BufferGeometry {
     }
   }
 
-  // Deterministic scattered architectural panel seams on ~34% of walls (strictly following wall curves & lines!)
-  const sampleSlice = (t: number, width: number) => {
-    const halfT = (width * 0.5) / Math.max(0.05, arcLen);
-    const tA = Math.max(0.08, t - halfT);
-    const tB = Math.min(0.92, t + halfT);
-    const ringPtsAt = (tt: number): [number, number, number][] => {
-      const phi = wall.kind === 'lat' ? wall.phiStart : wall.phiStart + totalPhiSpan * tt;
-      const theta = wall.kind === 'lon' ? wall.thetaStart : wall.thetaStart + totalThetaSpan * tt;
-      sphToDir(phi, theta, dir);
-      if (wall.kind === 'lat') {
-        tangent.set(-Math.sin(theta), 0, Math.cos(theta)).normalize();
-      } else {
-        tangent.set(Math.cos(phi) * Math.cos(theta), -Math.sin(phi), Math.cos(phi) * Math.sin(theta)).normalize();
-      }
-      binormal.crossVectors(dir, tangent).normalize();
+  // Crisp architectural 45°-chamfered interlocking panel-line grooves (Syd Mead / Aperture / CNC modular plates)
+  // Mapped directly onto the curved 3D vertical side faces & top chamfers of each wall blade!
+  const wallH = rBevelStart - rBase;
+  const trimFrac = Math.min(0.28, (POST_RAD_UPPER + 0.0022) / Math.max(0.05, arcLen));
+  const usableArc = Math.max(0.02, arcLen * (1 - trimFrac * 2));
+  const p0 = new THREE.Vector3();
+  const p1 = new THREE.Vector3();
+  const segDir = new THREE.Vector3();
+  const faceNorm = new THREE.Vector3();
+  const perp = new THREE.Vector3();
 
-      const out: [number, number, number][] = [];
-      for (let p = 0; p < profile.length; p++) {
-        const [offset, radius] = profile[p];
-        pt.copy(dir).multiplyScalar(radius).addScaledVector(binormal, offset * radius);
-        pt.normalize().multiplyScalar(radius);
-        out.push([pt.x, pt.y, pt.z]);
+  const evalSidePt = (u: number, v: number, side: number, out: THREE.Vector3, outNorm?: THREE.Vector3) => {
+    const tt = trimFrac + u * (1 - trimFrac * 2);
+    const phi = wall.kind === 'lat' ? wall.phiStart : wall.phiStart + totalPhiSpan * tt;
+    const theta = wall.kind === 'lon' ? wall.thetaStart : wall.thetaStart + totalThetaSpan * tt;
+    sphToDir(phi, theta, dir);
+    if (wall.kind === 'lat') {
+      tangent.set(-Math.sin(theta), 0, Math.cos(theta)).normalize();
+    } else {
+      tangent.set(Math.cos(phi) * Math.cos(theta), -Math.sin(phi), Math.cos(phi) * Math.sin(theta)).normalize();
+    }
+    binormal.crossVectors(dir, tangent).normalize();
+
+    const rr = rBase + v * wallH;
+    const off = side * (hwBase + (hwUpper - hwBase) * v + 0.00025);
+    out.copy(dir).multiplyScalar(rr).addScaledVector(binormal, off * rr);
+    out.normalize().multiplyScalar(rr);
+    if (outNorm) outNorm.copy(binormal).multiplyScalar(side);
+  };
+
+  const pushSidePolyline = (side: number, ptsUv: [number, number][], halfW = 0.00072) => {
+    for (let k = 0; k < ptsUv.length - 1; k++) {
+      const [uA, vA] = ptsUv[k];
+      const [uB, vB] = ptsUv[k + 1];
+      const du = (uB - uA) * usableArc;
+      const dv = (vB - vA) * wallH;
+      const segLen = Math.hypot(du, dv);
+      const subSteps = Math.max(1, Math.ceil(segLen * 36));
+      for (let s = 0; s < subSteps; s++) {
+        const f0 = s / subSteps;
+        const f1 = (s + 1) / subSteps;
+        evalSidePt(uA + (uB - uA) * f0, vA + (vB - vA) * f0, side, p0, faceNorm);
+        evalSidePt(uA + (uB - uA) * f1, vA + (vB - vA) * f1, side, p1);
+        segDir.subVectors(p1, p0);
+        if (segDir.lengthSq() < 1e-12) continue;
+        segDir.normalize();
+        perp.crossVectors(faceNorm, segDir).normalize().multiplyScalar(halfW);
+
+        const base = positions.length / 3;
+        positions.push(
+          p0.x - perp.x, p0.y - perp.y, p0.z - perp.z,
+          p0.x + perp.x, p0.y + perp.y, p0.z + perp.z,
+          p1.x - perp.x, p1.y - perp.y, p1.z - perp.z,
+          p1.x + perp.x, p1.y + perp.y, p1.z + perp.z,
+        );
+        indices.push(base, base + 1, base + 2, base + 1, base + 3, base + 2);
       }
-      return out;
-    };
-    const rA = ringPtsAt(tA);
-    const rB = ringPtsAt(tB);
-    const n = rA.length;
-    const base = positions.length / 3;
-    for (let i = 0; i < n; i++) positions.push(rA[i][0], rA[i][1], rA[i][2]);
-    for (let i = 0; i < n; i++) positions.push(rB[i][0], rB[i][1], rB[i][2]);
-    for (let i = 0; i < n - 1; i++) {
-      const a = base + i;
-      const b = base + n + i;
-      const c = base + n + i + 1;
-      const d = base + i + 1;
-      indices.push(a, b, d, b, c, d);
     }
   };
 
-  const h = (((wall.id + 13) * 2654435761) >>> 0) / 4294967296;
-  if (arcLen > 0.22 && h < 0.34) {
-    if (h < 0.2) {
-      // Off-center transverse panel slice (stays clear of center padlock / arrow glyphs)
-      sampleSlice(h < 0.1 ? 0.29 : 0.71, 0.0014);
-    } else {
-      // Curved longitudinal datum seam running along both vertical side faces of the wall
-      const rBand = R_FLOOR + (R_WALL - R_FLOOR) * (h < 0.27 ? 0.62 : 0.38);
-      const halfBand = 0.00085;
-      const bandSteps = Math.max(8, Math.ceil(arcLen * 24));
-      const trimFrac = Math.min(0.28, (POST_RAD_UPPER + 0.0015) / Math.max(0.05, arcLen));
-      for (const side of [-1, 1]) {
-        const off = side * (WALL_HALF_WIDTH * 1.01 + lift);
-        const base = positions.length / 3;
-        for (let s = 0; s <= bandSteps; s++) {
-          const tt = trimFrac + (s / bandSteps) * (1 - trimFrac * 2);
-          const phi = wall.kind === 'lat' ? wall.phiStart : wall.phiStart + totalPhiSpan * tt;
-          const theta = wall.kind === 'lon' ? wall.thetaStart : wall.thetaStart + totalThetaSpan * tt;
-          sphToDir(phi, theta, dir);
-          if (wall.kind === 'lat') {
-            tangent.set(-Math.sin(theta), 0, Math.cos(theta)).normalize();
-          } else {
-            tangent.set(Math.cos(phi) * Math.cos(theta), -Math.sin(phi), Math.cos(phi) * Math.sin(theta)).normalize();
-          }
-          binormal.crossVectors(dir, tangent).normalize();
+  // Tiny precision machined corner micro-pinhole (like CNC fastener dots in the reference plate)
+  const pushSidePin = (side: number, uC: number, vC: number, rad = 0.0024) => {
+    const segs = 10;
+    const pts: [number, number][] = [];
+    for (let i = 0; i <= segs; i++) {
+      const ang = (i / segs) * Math.PI * 2;
+      const du = (Math.cos(ang) * rad) / usableArc;
+      const dv = (Math.sin(ang) * rad) / wallH;
+      pts.push([Math.max(0.02, Math.min(0.98, uC + du)), Math.max(0.05, Math.min(0.95, vC + dv))]);
+    }
+    pushSidePolyline(side, pts, 0.00055);
+  };
 
-          for (const rr of [rBand - halfBand, rBand + halfBand]) {
-            pt.copy(dir).multiplyScalar(rr).addScaledVector(binormal, off * rr);
-            pt.normalize().multiplyScalar(rr);
-            positions.push(pt.x, pt.y, pt.z);
-          }
-        }
-        for (let s = 0; s < bandSteps; s++) {
-          const a = base + s * 2;
-          const b = a + 1;
-          const c = a + 2;
-          const d = a + 3;
-          if (side > 0) indices.push(a, b, c, b, d, c);
-          else indices.push(a, c, b, b, c, d);
-        }
-      }
+  const h = (((wall.id + 13) * 2654435761) >>> 0) / 4294967296;
+  const h2 = (((wall.id + 71) * 2246822519) >>> 0) / 4294967296;
+  const mirror = (pts: [number, number][]): [number, number][] =>
+    h2 > 0.5 ? pts.map(([u, v]) => [1 - u, v]) : pts;
+
+  // Restrained architectural utility: keep ~86% of walls pure monolithic alabaster;
+  // only ~14% of longer walls carry a single quiet flush service-box / control-bay access hatch
+  if (usableArc > 0.14 && h < 0.14) {
+    const side = h2 > 0.5 ? 1 : -1;
+    const hw = 0.00058;
+    if (h < 0.07) {
+      // Flush chamfered-corner utility box cover with a single tiny calibration/release pinhole
+      pushSidePolyline(
+        side,
+        mirror([
+          [0.24, 0.16],
+          [0.24, 0.72],
+          [0.32, 0.8],
+          [0.74, 0.8],
+          [0.74, 0.16],
+          [0.24, 0.16],
+        ]),
+        hw,
+      );
+      pushSidePin(side, h2 > 0.5 ? 0.32 : 0.68, 0.28, 0.002);
+    } else {
+      // Flush floor-mounted actuator / control bay access panel
+      pushSidePolyline(
+        side,
+        mirror([
+          [0.28, 0.03],
+          [0.28, 0.62],
+          [0.36, 0.7],
+          [0.72, 0.7],
+          [0.72, 0.03],
+        ]),
+        hw,
+      );
+      pushSidePin(side, h2 > 0.5 ? 0.36 : 0.64, 0.58, 0.002);
     }
   }
 
@@ -1057,8 +1253,8 @@ function buildPostGeometry(post: VertexPost): THREE.BufferGeometry {
  */
 function buildSeamGridGeometry(grid: SphereGrid): THREE.BufferGeometry {
   const geos: THREE.BufferGeometry[] = [];
-  const rSeam = R_FLOOR + 0.0011;
-  const railHalf = 0.0016;
+  const rSeam = R_FLOOR + 0.00025;
+  const railHalf = 0.0009;
   const slotEdge = WALL_HALF_WIDTH * 1.04;
 
   const dir = new THREE.Vector3();
@@ -1156,8 +1352,8 @@ function buildSeamGridGeometry(grid: SphereGrid): THREE.BufferGeometry {
  */
 function buildFloorSubSeamsGeometry(grid: SphereGrid): THREE.BufferGeometry {
   const geos: THREE.BufferGeometry[] = [];
-  const rSeam = R_FLOOR + 0.00105;
-  const halfW = 0.00115;
+  const rSeam = R_FLOOR + 0.00022;
+  const halfW = 0.00072;
   const margin = WALL_HALF_WIDTH * 1.12;
 
   const pA = new THREE.Vector3();
@@ -1617,8 +1813,6 @@ export function buildLabyrinthRig(grid: SphereGrid): LabyrinthRig {
     color: COLOR_FLOOR,
     roughness: 0.78,
     roughnessMap: matteRough,
-    bumpMap: matteBump,
-    bumpScale: 0.002,
     metalness: 0.0,
   });
   const steelMat = new THREE.MeshStandardMaterial({
@@ -1632,12 +1826,24 @@ export function buildLabyrinthRig(grid: SphereGrid): LabyrinthRig {
     roughness: 0.65,
   });
   const seamMat = new THREE.MeshStandardMaterial({
-    color: 0x867d70,
-    roughness: 0.9,
+    color: 0xb4aea4, // quiet pale architectural hairline groove for wall joints & rare flush utility hatches
+    roughness: 0.88,
     metalness: 0.0,
+    side: THREE.DoubleSide,
     polygonOffset: true,
     polygonOffsetFactor: -1,
     polygonOffsetUnits: -1,
+  });
+  const floorSlotSeamMat = new THREE.MeshStandardMaterial({
+    color: 0xa0988b, // crisp flat hairline floor seam (subtle yet clearly readable, zero embossing)
+    roughness: 0.86,
+    metalness: 0.0,
+    transparent: true,
+    opacity: 0.64,
+    depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -2,
+    polygonOffsetUnits: -2,
   });
   const holeChamferMat = new THREE.MeshStandardMaterial({
     color: 0xded6c8, // slightly brighter satin alabaster bevel lip catching studio light around every hole
@@ -1645,7 +1851,7 @@ export function buildLabyrinthRig(grid: SphereGrid): LabyrinthRig {
     roughnessMap: matteRough,
     metalness: 0.02,
   });
-  disposables.push(floorMat, steelMat, darkSlotMat, seamMat, holeChamferMat);
+  disposables.push(floorMat, steelMat, darkSlotMat, seamMat, floorSlotSeamMat, holeChamferMat);
 
   const buildHoleChamferGeo = (rHole: number) => {
     const pts = [
@@ -1725,14 +1931,18 @@ export function buildLabyrinthRig(grid: SphereGrid): LabyrinthRig {
   // =========================================================================
   const solidFloorGeos: THREE.BufferGeometry[] = [];
   const windowPaneGeos: THREE.BufferGeometry[] = [];
+  const windowChamferGeos: THREE.BufferGeometry[] = [];
+  const windowSeamGeos: THREE.BufferGeometry[] = [];
 
   for (const cell of grid.cells) {
     if (cell.panelKind === 'solid') {
       solidFloorGeos.push(buildSolidCellShell(cell));
     } else if (cell.panelKind === 'window') {
-      const { frameGeo, paneGeo } = buildWindowCellParts(cell);
+      const { frameGeo, paneGeo, chamferGeo, seamGeo } = buildWindowCellParts(cell);
       solidFloorGeos.push(frameGeo);
       windowPaneGeos.push(paneGeo);
+      windowChamferGeos.push(chamferGeo);
+      windowSeamGeos.push(seamGeo);
     } else if (cell.panelKind === 'shutter') {
       solidFloorGeos.push(buildPerforatedShutterCell(cell));
     }
@@ -1744,6 +1954,24 @@ export function buildLabyrinthRig(grid: SphereGrid): LabyrinthRig {
   floorMesh.receiveShadow = true;
   root.add(floorMesh);
   disposables.push(mergedFloorGeo);
+
+  // Sculpted 45° recessed chamfers + flat hairline perimeter seams framing every floor inspection window
+  if (windowChamferGeos.length > 0) {
+    const mergedWinChamferGeo = mergeGeometries(windowChamferGeos);
+    const winChamferMesh = new THREE.Mesh(mergedWinChamferGeo, holeChamferMat);
+    winChamferMesh.castShadow = true;
+    winChamferMesh.receiveShadow = true;
+    root.add(winChamferMesh);
+    disposables.push(mergedWinChamferGeo);
+  }
+  if (windowSeamGeos.length > 0) {
+    const mergedWinSeamGeo = mergeGeometries(windowSeamGeos);
+    const winSeamMesh = new THREE.Mesh(mergedWinSeamGeo, floorSlotSeamMat);
+    winSeamMesh.receiveShadow = true;
+    root.add(winSeamMesh);
+    baseAoExcluded.push(winSeamMesh);
+    disposables.push(mergedWinSeamGeo);
+  }
 
   // Flush crystal-clear polycarbonate inspection windows (excluded from GTAO so lower half-pipes get full SSAO!)
   const mergedWindowGeo = mergeGeometries(windowPaneGeos);
@@ -1942,19 +2170,21 @@ export function buildLabyrinthRig(grid: SphereGrid): LabyrinthRig {
   }
 
   // =========================================================================
-  // 4. CRISP RECESSED FLOOR SEAM GRID + STEADY POLES + RETRACTABLE WALL BLADES
+  // 4. FLAT HAIRLINE FLOOR SEAM GRID + STEADY POLES + RETRACTABLE WALL BLADES
   // =========================================================================
   const seamGeo = buildSeamGridGeometry(grid);
-  const seamMesh = new THREE.Mesh(seamGeo, seamMat);
+  const seamMesh = new THREE.Mesh(seamGeo, floorSlotSeamMat);
   seamMesh.receiveShadow = true;
   root.add(seamMesh);
+  baseAoExcluded.push(seamMesh);
   disposables.push(seamGeo);
 
   // Subtle deterministic architectural floor panel sub-seams following latitude/longitude curves
   const floorSubSeamsGeo = buildFloorSubSeamsGeometry(grid);
-  const floorSubSeamsMesh = new THREE.Mesh(floorSubSeamsGeo, seamMat);
+  const floorSubSeamsMesh = new THREE.Mesh(floorSubSeamsGeo, floorSlotSeamMat);
   floorSubSeamsMesh.receiveShadow = true;
   root.add(floorSubSeamsMesh);
+  baseAoExcluded.push(floorSubSeamsMesh);
   disposables.push(floorSubSeamsGeo);
 
   const baseWallMat = new THREE.MeshStandardMaterial({
@@ -1992,6 +2222,7 @@ export function buildLabyrinthRig(grid: SphereGrid): LabyrinthRig {
     const colSeamGeo = buildWallColumnSeamGeometry(wall);
     const colSeamMesh = new THREE.Mesh(colSeamGeo, seamMat);
     mesh.add(colSeamMesh);
+    baseAoExcluded.push(colSeamMesh);
     disposables.push(colSeamGeo);
 
     let arrowMat: THREE.MeshStandardMaterial | null = null;
@@ -2234,6 +2465,8 @@ export function buildLabyrinthRig(grid: SphereGrid): LabyrinthRig {
   let lastClearedIdx = -1;
 
   function setLevelVisuals(level: LevelConfig) {
+    activeLevelRef = level;
+    lastAllClearedFilm = false;
     for (const d of levelDisposables) d.dispose();
     levelDisposables = [];
     for (const o of attachedGateOverlays) {
@@ -2486,6 +2719,7 @@ export function buildLabyrinthRig(grid: SphereGrid): LabyrinthRig {
     }
 
     syncAoExcluded();
+    ledFilm.setLevel(level.level, level.name, level.nameJa, false);
   }
 
   const activeLight = new THREE.PointLight(0xff7820, 0.72, 0.92, 1.8);
@@ -2498,38 +2732,110 @@ export function buildLabyrinthRig(grid: SphereGrid): LabyrinthRig {
   root.add(pipeAmbientLight);
 
   // =========================================================================
-  // 7. CHROME BEARING BALL + THIN CLEAR PLASTIC SHELL + LIGHT SCRATCHES + SWEDEN TAPE
+  // 7. FROSTED GLASS MARBLE + THIN CLEAR PLASTIC SHELL + LIGHT SCRATCHES + SWEDEN TAPE
   // =========================================================================
-  const ballGeo = new THREE.SphereGeometry(R_BALL, 36, 28);
-  const ballRoughTex = createMetalBallTexture();
-  const ballMat = new THREE.MeshStandardMaterial({
-    color: 0xd9dce2,
-    metalness: 0.99,
-    roughness: 0.09,
-    roughnessMap: ballRoughTex,
-    envMapIntensity: 2.15,
+  // Fine micro-etched sandblasted roughness & bump texture for authentic acid-etched Swedish glass
+  const frostCanvas = document.createElement('canvas');
+  frostCanvas.width = 256;
+  frostCanvas.height = 256;
+  const fCtx = frostCanvas.getContext('2d')!;
+  const fImg = fCtx.createImageData(256, 256);
+  let fSeed = 1337;
+  const fRand = () => {
+    fSeed = (fSeed * 1664525 + 1013904223) >>> 0;
+    return fSeed / 4294967296;
+  };
+  for (let i = 0; i < 256 * 256; i++) {
+    // High-frequency fine frosted glass micro-grain centered around ~0.78 roughness scale
+    const v = Math.round(182 + (fRand() - 0.5) * 44 + (fRand() - 0.5) * 26);
+    const p = i * 4;
+    fImg.data[p] = fImg.data[p + 1] = fImg.data[p + 2] = Math.max(120, Math.min(245, v));
+    fImg.data[p + 3] = 255;
+  }
+  fCtx.putImageData(fImg, 0, 0);
+  const frostRoughTex = new THREE.CanvasTexture(frostCanvas);
+  frostRoughTex.wrapS = frostRoughTex.wrapT = THREE.RepeatWrapping;
+  frostRoughTex.repeat.set(3, 3);
+
+  // Zero-extra-pass frosted sea-glass marble: avoids Three.js full-scene transmission prepass while preserving
+  // identical velvety acid-etched glass optics, mineral internal depth, and luminous Fresnel rim bloom!
+  const ballGeo = new THREE.SphereGeometry(R_BALL, 40, 28);
+  const ballMat = new THREE.MeshPhysicalMaterial({
+    color: 0x9ab4ba, // cool Scandinavian frosted sea-glass mineral body
+    metalness: 0.0,
+    roughness: 0.44,
+    roughnessMap: frostRoughTex,
+    bumpMap: frostRoughTex,
+    bumpScale: 0.0011,
+    clearcoat: 0.3,
+    clearcoatRoughness: 0.32,
+    reflectivity: 0.85,
+    ior: 1.52,
+    sheen: 0.65,
+    sheenRoughness: 0.52,
+    sheenColor: new THREE.Color(0xf4fbfc), // velvety frosted-glass Fresnel rim bloom
+    envMapIntensity: 1.75,
   });
+  ballMat.onBeforeCompile = (shader) => {
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <dithering_fragment>',
+      `
+      // Subtle translucent internal subsurface scatter & luminous frosted glass edge
+      vec3 mView = normalize(vViewPosition);
+      float mNdotV = clamp(abs(dot(normalize(normal), mView)), 0.0, 1.0);
+      float mRim = pow(1.0 - mNdotV, 2.1);
+      float mCore = pow(mNdotV, 1.5);
+      gl_FragColor.rgb = mix(gl_FragColor.rgb, gl_FragColor.rgb * vec3(0.84, 0.93, 0.95), mCore * 0.24);
+      gl_FragColor.rgb += vec3(0.24, 0.30, 0.31) * mRim;
+      #include <dithering_fragment>
+      `,
+    );
+  };
   const ballMesh = new THREE.Mesh(ballGeo, ballMat);
   ballMesh.castShadow = true;
   ballMesh.receiveShadow = true;
+
+  // 6 precision-inlaid octahedral calibration dots (±X, ±Y, ±Z) hugging the frosted marble surface
+  // Makes rolling inertia immediately readable; back-side dots softly ghost through the frosted glass!
+  const dotCapGeo = new THREE.SphereGeometry(R_BALL + 0.00055, 18, 10, 0, Math.PI * 2, 0, 0.165);
+  const dotMat = new THREE.MeshStandardMaterial({
+    color: 0x263236, // deep matte charcoal-slate inlay matching studio ink & smoked glass
+    roughness: 0.62,
+    metalness: 0.05,
+  });
+  const dotAxes: THREE.Vector3[] = [
+    new THREE.Vector3(1, 0, 0),
+    new THREE.Vector3(-1, 0, 0),
+    new THREE.Vector3(0, 1, 0),
+    new THREE.Vector3(0, -1, 0),
+    new THREE.Vector3(0, 0, 1),
+    new THREE.Vector3(0, 0, -1),
+  ];
+  for (const ax of dotAxes) {
+    const dot = new THREE.Mesh(dotCapGeo, dotMat);
+    dot.quaternion.setFromUnitVectors(upAxis, ax);
+    ballMesh.add(dot);
+  }
+
   root.add(ballMesh);
-  disposables.push(ballGeo, ballRoughTex, ballMat);
+  disposables.push(ballGeo, frostRoughTex, ballMat, dotCapGeo, dotMat);
 
-  const { roughnessMap: scratchRough, bumpMap: scratchBump, scratchAlphaMap } = createPlasticScratchTextures();
-  disposables.push(scratchRough, scratchBump, scratchAlphaMap);
+  const { roughnessMap: scratchRough, bumpMap: scratchBump, scratchMap, scratchAlphaMap } = createPlasticScratchTextures();
+  disposables.push(scratchRough, scratchBump, scratchMap, scratchAlphaMap);
 
-  const shellGeo = new THREE.SphereGeometry(R_SHELL, 88, 64);
+  const shellGeo = new THREE.SphereGeometry(R_SHELL, 64, 48);
   const plasticOpacityUniform = { value: 1.0 };
 
   const plasticMat = new THREE.MeshPhysicalMaterial({
     color: 0xfdfcf9,
-    roughness: 0.055,
+    roughness: 0.34, // base rgb 34 -> ~0.045 glossy; smudges -> ~0.28 hazy clearcoat scatter
     roughnessMap: scratchRough,
     bumpMap: scratchBump,
-    bumpScale: 0.0032,
+    bumpScale: 0.0026,
     metalness: 0.0,
     clearcoat: 1.0,
-    clearcoatRoughness: 0.048,
+    clearcoatRoughness: 0.28,
+    clearcoatRoughnessMap: scratchRough,
     reflectivity: 0.92,
     ior: 1.49,
     envMapIntensity: 2.35,
@@ -2550,7 +2856,8 @@ export function buildLabyrinthRig(grid: SphereGrid): LabyrinthRig {
         float fresnel = pow(1.0 - ndotv, 2.55);
         float specEnergy = max(max(reflectedLight.directSpecular.r, reflectedLight.directSpecular.g), reflectedLight.directSpecular.b)
                          + max(max(reflectedLight.indirectSpecular.r, reflectedLight.indirectSpecular.g), reflectedLight.indirectSpecular.b) * 0.65;
-        float shellAlpha = clamp((0.022 + fresnel * 0.44 + specEnergy * 0.36) * uPlasticScale, 0.0, 0.8);
+        float smudgeLift = smoothstep(0.08, 0.28, roughnessFactor) * 0.22;
+        float shellAlpha = clamp((0.022 + fresnel * 0.44 + specEnergy * 0.36 + smudgeLift) * uPlasticScale, 0.0, 0.84);
         gl_FragColor.a = shellAlpha;
         #include <dithering_fragment>
         `,
@@ -2565,11 +2872,13 @@ export function buildLabyrinthRig(grid: SphereGrid): LabyrinthRig {
 
   const scratchOverlayMat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
+    map: scratchMap,
     alphaMap: scratchAlphaMap,
     transparent: true,
-    opacity: 0.56,
-    roughness: 0.22,
-    metalness: 0.14,
+    opacity: 0.62,
+    roughness: 0.2,
+    metalness: 0.08,
+    envMapIntensity: 1.6,
     depthWrite: false,
   });
   const scratchOverlayMesh = new THREE.Mesh(shellGeo, scratchOverlayMat);
@@ -2595,15 +2904,16 @@ export function buildLabyrinthRig(grid: SphereGrid): LabyrinthRig {
   baseAoExcluded.push(outerSeam);
   disposables.push(outerSeamGeo, outerSeamMat);
 
-  const primaryTape = createTapeTexture('primary');
-  const primaryTapeGeo = buildCurvedTapePatch(R_SHELL + 0.0042, 0.38, 0.96, 0.21, 0.11);
+  // Translucent flexible E-Ink electrophoretic film ribbon along the equator
+  const ledFilm = createLedFilmDisplay();
+  const primaryTapeGeo = buildCurvedTapePatch(R_SHELL + 0.0046, 0.36, 1.32, 0.215, 0.0);
   const primaryTapeMat = new THREE.MeshPhysicalMaterial({
-    map: primaryTape.map,
-    roughnessMap: primaryTape.roughnessMap,
-    roughness: 0.42,
-    metalness: 0.0,
-    clearcoat: 0.34,
-    clearcoatRoughness: 0.3,
+    map: ledFilm.map,
+    roughnessMap: ledFilm.roughnessMap,
+    roughness: 0.68,
+    metalness: 0.03,
+    clearcoat: 0.3,
+    clearcoatRoughness: 0.34,
     transparent: true,
     depthWrite: false,
     side: THREE.FrontSide,
@@ -2612,7 +2922,7 @@ export function buildLabyrinthRig(grid: SphereGrid): LabyrinthRig {
   primaryTapeMesh.renderOrder = 14;
   root.add(primaryTapeMesh);
   baseAoExcluded.push(primaryTapeMesh);
-  disposables.push(primaryTape.map, primaryTape.roughnessMap, primaryTapeGeo, primaryTapeMat);
+  disposables.push(ledFilm, primaryTapeGeo, primaryTapeMat);
 
   const secondaryTape = createTapeTexture('secondary');
   const secondaryTapeGeo = buildCurvedTapePatch(R_SHELL + 0.0042, Math.PI + 0.18, 0.78, 0.17, -0.075);
@@ -2792,6 +3102,9 @@ export function buildLabyrinthRig(grid: SphereGrid): LabyrinthRig {
   const colorPipeTarget = new THREE.Color(0x2ad9c6);
   const colorLockedDim = new THREE.Color(0x6e6a64);
 
+  let activeLevelRef: LevelConfig | null = null;
+  let lastAllClearedFilm = false;
+
   function updateLeds(
     time: number,
     clearedMask: boolean[],
@@ -2800,6 +3113,11 @@ export function buildLabyrinthRig(grid: SphereGrid): LabyrinthRig {
     toggleMask: number,
     togglePulse: Float32Array,
   ) {
+    if (activeLevelRef && allCleared !== lastAllClearedFilm) {
+      lastAllClearedFilm = allCleared;
+      ledFilm.setLevel(activeLevelRef.level, activeLevelRef.name, activeLevelRef.nameJa, allCleared);
+    }
+    ledFilm.update(time);
     let newestCleared = -1;
     for (let i = 0; i < leds.length; i++) {
       if (clearedMask[i]) newestCleared = i;
@@ -2934,8 +3252,10 @@ export function buildLabyrinthRig(grid: SphereGrid): LabyrinthRig {
   }
 
   function setScratchStrength(scale: number) {
-    scratchOverlayMat.opacity = 0.56 * scale;
-    plasticMat.bumpScale = 0.0032 * scale;
+    scratchOverlayMat.opacity = 0.62 * scale;
+    plasticMat.bumpScale = 0.0022 * scale;
+    plasticMat.roughness = 0.045 + 0.28 * scale;
+    plasticMat.clearcoatRoughness = 0.04 + 0.24 * scale;
   }
 
   function dispose() {
@@ -2956,6 +3276,8 @@ export function buildLabyrinthRig(grid: SphereGrid): LabyrinthRig {
     applyPoleShutters,
     setReadyHole,
     setLevelVisuals,
+    triggerLedIntro: () => ledFilm.restartIntro(),
+    clearLedTape: () => ledFilm.clearToBlank(),
     updateLeds,
     setPlasticOpacity,
     setScratchStrength,
