@@ -35,6 +35,9 @@ export interface IceUniforms {
   // Custom base (water vs opaque coconut) & max-2 flavor optical uniforms
   uOpacity: { value: number };
   uIsDual: { value: number };
+  uKiwiA: { value: number };
+  uKiwiB: { value: number };
+  uTajinCoat: { value: number };
   uSigmaA: { value: THREE.Vector3 };
   uCoreA: { value: THREE.Vector3 };
   uMidA: { value: THREE.Vector3 };
@@ -75,8 +78,13 @@ function createCameraDepthMaterial(tag: number, side: THREE.Side): THREE.ShaderM
     vertexShader: /* glsl */ `
       varying float vCamDepth;
       void main() {
-        vec4 mvPos = viewMatrix * modelMatrix * vec4(position, 1.0);
-        vCamDepth = -mvPos.z;
+        vec4 localPos = vec4(position, 1.0);
+        #ifdef USE_INSTANCING
+          localPos = instanceMatrix * localPos;
+        #endif
+        vec4 mvPos = viewMatrix * modelMatrix * localPos;
+        // Signed depth relative to world origin (centered at 0 -> ~32-64x finer fp16 precision, zero contour banding!)
+        vCamDepth = viewMatrix[3].z - mvPos.z;
         gl_Position = projectionMatrix * mvPos;
       }
     `,
@@ -118,6 +126,9 @@ function createOpticalIceMaterial(initialRecipe: PopsicleRecipe): { material: TH
     uSeedOffset: { value: 0 },
     uOpacity: { value: pal.opacity },
     uIsDual: { value: pal.isDual ? 1.0 : 0.0 },
+    uKiwiA: { value: pal.kiwiMaskA },
+    uKiwiB: { value: pal.kiwiMaskB },
+    uTajinCoat: { value: initialRecipe.toppings.includes('tajin') ? 1.0 : 0.0 },
     uSigmaA: { value: new THREE.Vector3(...pal.sigmaA) },
     uCoreA: { value: new THREE.Vector3(...pal.coreA) },
     uMidA: { value: new THREE.Vector3(...pal.midA) },
@@ -157,7 +168,7 @@ function createOpticalIceMaterial(initialRecipe: PopsicleRecipe): { material: TH
         vec4 mvPos = viewMatrix * wp;
         vWorldPos = wp.xyz;
         vWorldNormal = normalize(mat3(modelMatrix) * normal);
-        vCamDepth = -mvPos.z;
+        vCamDepth = viewMatrix[3].z - mvPos.z;
         gl_Position = projectionMatrix * mvPos;
       }
     `,
@@ -183,6 +194,9 @@ function createOpticalIceMaterial(initialRecipe: PopsicleRecipe): { material: TH
       uniform float uSeedOffset;
       uniform float uOpacity;
       uniform float uIsDual;
+      uniform float uKiwiA;
+      uniform float uKiwiB;
+      uniform float uTajinCoat;
       uniform vec3 uSigmaA;
       uniform vec3 uCoreA;
       uniform vec3 uMidA;
@@ -299,6 +313,31 @@ function createOpticalIceMaterial(initialRecipe: PopsicleRecipe): { material: TH
         // Varied translucency per shard: some faintly frosted in cream, some bright crisp white crystals on top!
         float intensity = mix(0.32, 1.12, h2.z * h2.z * 0.55 + h2.y * 0.45);
         return vec2(mask, intensity);
+      }
+
+      // Single-cell jittered 3D organic teardrop/oval kiwi seed (embedded automatically inside Kiwi green zones!)
+      float evalKiwiSeedCell(vec3 p, float prob, float sizeScale, float softEdge) {
+        vec3 cell = floor(p);
+        vec3 f = fract(p);
+        vec3 h1 = hash33(cell + 13.41);
+        if (h1.x > prob) return 0.0;
+
+        vec3 h2 = hash33(cell + 57.83);
+        vec3 ctr = vec3(0.24) + h2 * 0.52;
+        vec3 d = f - ctr;
+
+        // Random 3D seed axis orientation so suspended kiwi seeds tumble naturally in the frozen puree
+        float angXY = h1.y * 6.2831853;
+        float ca = cos(angXY);
+        float sa = sin(angXY);
+        vec3 dr = vec3(d.x * ca - d.y * sa, d.x * sa + d.y * ca, d.z);
+
+        float rBase = mix(0.085, 0.135, h1.z) * sizeScale;
+        // Subtle teardrop pinch toward one end of the oval kiwi seed
+        float pinch = 1.0 + clamp(dr.x / max(rBase * 2.2, 0.01), -0.8, 0.8) * 0.22;
+        vec3 q = dr / vec3(rBase * 1.75, rBase * pinch, rBase * 1.35);
+        float dist = length(q);
+        return revStep(1.0 + softEdge, max(0.08, 1.0 - softEdge * 0.85), dist);
       }
 
       // Tactile thawing ice micro-relief + spatially varied frozen crystal roughness + baked 3D Voronoi slush beads!
@@ -660,9 +699,24 @@ function createOpticalIceMaterial(initialRecipe: PopsicleRecipe): { material: TH
         float edgeRichness = pow(1.0 - N0dotV, 1.32);
         float fluteOptical = smoothstep(0.10, 0.34, abs(N0.x)) * revStep(0.76, 0.38, abs(N0.x));
 
-        // Organic dual-flavor layered/marbled swirl (Flavor A upper half -> Flavor B lower half)
+        // Organic dual-flavor layered swirl on Water ice vs bold hand-spooned 3D marbled distribution on Cream paletas!
         float swirlWave = (cloudMacro - 0.5) * 0.46 + (cloudMed - 0.5) * 0.24 + sin(icePos.x * 4.4 + uSeedOffset) * 0.08;
-        float dualMix = uIsDual > 0.5 ? smoothstep(-0.34, 0.34, -icePos.y + swirlWave) : 0.0;
+        float waterDualMix = smoothstep(-0.34, 0.34, -icePos.y + swirlWave);
+        float milkDualMix = waterDualMix;
+        float milkCreamPocket = 0.0;
+        if (isMilkBase > 0.01) {
+          vec3 swirlP = icePos * vec3(1.65, 1.32, 1.65) + vec3(uSeedOffset * 0.73, -uSeedOffset * 0.41, uSeedOffset * 0.59);
+          vec4 swW = texture(uNoise3D, swirlP * INV_P6);
+          vec3 swirlWarp = (swW.rgb - 0.5) * 2.25;
+          vec4 swF = texture(uNoise3D, (swirlP * 1.15 + swirlWarp) * INV_P6);
+          float dualField = swF.r * 0.62 + swF.g * 0.26 + swF.a * 0.12 - icePos.y * 0.07;
+          milkDualMix = smoothstep(0.38, 0.60, dualField);
+          // On single-flavor cream paletas, swirl 2-3 bold organic condensed-milk cream pockets right through the fruit puree!
+          vec4 swP = texture(uNoise3D, (swirlP * vec3(1.12, 1.16, 1.12) + swirlWarp * 0.90 + vec3(2.4, -1.7, 3.1)) * INV_P6);
+          float pocketField = swP.r * 0.60 + swP.g * 0.26 + swF.a * 0.14;
+          milkCreamPocket = smoothstep(0.49, 0.585, pocketField) * isMilkBase * (1.0 - uIsDual);
+        }
+        float dualMix = uIsDual > 0.5 ? mix(waterDualMix, milkDualMix, isMilkBase) : 0.0;
 
         vec3 flvSigma = mix(uSigmaA, uSigmaB, dualMix);
         vec3 flvCore = mix(uCoreA, uCoreB, dualMix);
@@ -869,13 +923,19 @@ function createOpticalIceMaterial(initialRecipe: PopsicleRecipe): { material: TH
           float milkRibbon = smoothstep(0.46, 0.84, milkSwirlRaw) * isMilkBase;
           float microMottle = (mottleFine - 0.5) * 0.30 + (velvetSugarTooth - 0.5) * 0.24 + (verticalFreezeGrain - 0.5) * 0.14;
 
-          // Distinct organic light/dark tonal richness without washing vibrant fruit hues into chalky pastel!
+          // Distinct organic light/dark tonal richness + hand-swirled condensed-milk cream pockets on single-flavor paletas!
           vec3 paleMilkTint = mix(flvCreamAlb * 1.24 + vec3(0.14, 0.12, 0.11), vec3(0.94, 0.89, 0.80), 0.32);
           vec3 deepJuiceTint = mix(flvCreamDeep * 0.66, flvCreamAlb * 0.52, 0.30);
           vec3 swirledAlb = mix(flvCreamAlb, deepJuiceTint, pigmentPocket * 0.44);
           swirledAlb = mix(swirledAlb, paleMilkTint, milkRibbon * 0.34);
           vec3 swirledDeep = mix(flvCreamDeep, flvCreamDeep * 0.64, pigmentPocket * 0.36);
           swirledDeep = mix(swirledDeep, mix(flvCreamDeep, vec3(0.60, 0.50, 0.38), 0.20), milkRibbon * 0.24);
+          if (milkCreamPocket > 0.005) {
+            vec3 pureCreamAlb = vec3(0.95, 0.91, 0.83);
+            vec3 pureCreamDeep = vec3(0.66, 0.58, 0.47);
+            swirledAlb = mix(swirledAlb, pureCreamAlb, milkCreamPocket * 0.84);
+            swirledDeep = mix(swirledDeep, pureCreamDeep, milkCreamPocket * 0.78);
+          }
           milkSheenTint = mix(vec3(1.04, 1.00, 0.96), swirledAlb * 1.12 + vec3(0.30), 0.48);
 
           // Tactile velvety frozen-cream grain + shallow mold-dimple shading
@@ -1008,6 +1068,37 @@ function createOpticalIceMaterial(initialRecipe: PopsicleRecipe): { material: TH
           // to uncovered toppings as depth -> 0, so NEVER fall back to translucent water iceBody!
           float milkCoverage = mix(uOpacity * thinIceFade, uOpacity, isMilkBase);
           iceBody = mix(iceBody, creamBase, clamp(milkCoverage, 0.0, mix(0.96, 1.0, isMilkBase)));
+        }
+
+        // === AUTOMATIC VOLUMETRIC BLACK KIWI SEEDS SUSPENDED INSIDE KIWI GREEN ZONES ===
+        // Renders at 3 true-3D parallax depths (crisp surface specks -> softly veiled deeper seeds)
+        // masked strictly by the organic dual-flavor swirl boundary so Mango+Kiwi stays clean!
+        if (uKiwiA + uKiwiB > 0.01) {
+          float kiwiZone = smoothstep(0.18, 0.72, mix(uKiwiA, uKiwiB, dualMix)) * (1.0 - milkCreamPocket * 0.85) * (1.0 - hangClear * 0.90) * edgeMeltFade;
+          if (kiwiZone > 0.01) {
+            // Subtle crushed-kiwi puree fiber micro-mottling
+            iceBody *= 1.0 + (inSampFine.a - 0.5) * 0.10 * kiwiZone;
+
+            // Layer 3: deeper veiled olive-dark seeds suspended inside the green puree
+            vec3 kPos3 = icePos - V * 0.048;
+            vec3 kRot3 = vec3(kPos3.x * 0.62 - kPos3.y * 0.78, kPos3.x * 0.78 + kPos3.y * 0.62, kPos3.z);
+            float seedDeep = evalKiwiSeedCell(kRot3 * 13.5 + vec3(uSeedOffset * 1.9, -2.6, 4.1), 0.38, 1.15, 0.85);
+            vec3 deepSeedCol = mix(iceBody * 0.30, vec3(0.036, 0.032, 0.014), 0.45);
+            iceBody = mix(iceBody, deepSeedCol, clamp(seedDeep * kiwiZone * mix(0.50, 0.28, isMilkBase), 0.0, 0.58));
+
+            // Layer 2: mid-depth softly diffused dark seeds just under the skin
+            vec3 kPos2 = icePos - V * 0.022;
+            vec3 kRot2 = vec3(kPos2.x * 0.80 + kPos2.y * 0.60, -kPos2.x * 0.60 + kPos2.y * 0.80, kPos2.z);
+            float seedMid = evalKiwiSeedCell(kRot2 * 15.0 + vec3(-3.3, uSeedOffset * 2.3, 1.7), 0.42, 1.02, 0.52);
+            vec3 midSeedCol = mix(iceBody * 0.22, vec3(0.028, 0.020, 0.010), 0.72);
+            iceBody = mix(iceBody, midSeedCol, clamp(seedMid * kiwiZone * mix(0.74, 0.62, isMilkBase), 0.0, 0.78));
+
+            // Layer 1: crisp shallow espresso-black kiwi seeds right near the frozen surface
+            vec3 kPos1 = icePos - V * 0.005;
+            float seedSurf = evalKiwiSeedCell(kPos1 * 13.8 + vec3(uSeedOffset * 1.1, 4.7, -1.9), 0.36, 0.96, 0.24);
+            vec3 surfSeedCol = vec3(0.024, 0.015, 0.009);
+            iceBody = mix(iceBody, surfSeedCol, clamp(seedSurf * kiwiZone * 0.92, 0.0, 0.94));
+          }
         }
 
         // === GLOSSY VISCOUS MELT-SYRUP GLAZE LAYERING & BOTTOM PUDDLE ABSORPTION ===
@@ -1212,6 +1303,30 @@ function createOpticalIceMaterial(initialRecipe: PopsicleRecipe): { material: TH
           color += vec3(1.75, 1.70, 1.66) * (frostTuft * rimeMask * 0.62 + snowFlakeSpeck * 0.85 + frostSparkle * 0.58) * milkRimeCalm;
         }
 
+        // === SUPERFICIAL TAJÍN CHILI-PAPRIKA POWDER DUSTING TINT (washes away in organic vertical streaks as it melts!) ===
+        if (uTajinCoat > 0.5) {
+          float tajinUpper = smoothstep(0.05, 0.44, vUv.y);
+          vec3 tCoord = vWorldPos * vec3(2.8, 2.0, 2.8) + vec3(uSeedOffset * 0.7, -uSeedOffset * 0.35, 1.4);
+          float tClump = texture(uNoise3D, tCoord * INV_P8).r;
+          float tFine = texture(uNoise3D, (vWorldPos * 38.0 + vec3(uSeedOffset * 1.3, 4.1, -2.3)) * INV_P8).a;
+          float tMicro = texture(uNoise3D, (vWorldPos * 88.0 + vec3(-2.1, uSeedOffset * 0.9, 5.7)) * INV_P8).b;
+          // Coherent vertical melt streaks + wet liquid film wash the chili-powder dusting away organically!
+          float tStreak = texture(uNoise3D, (vWorldPos * vec3(5.6, 1.25, 5.6) + vec3(uSeedOffset * 1.1, 0.0, 2.2)) * INV_P8).g;
+          float meltWash = 1.0 - smoothstep(0.08 + tStreak * 0.24, 0.36 + tStreak * 0.36, uMelt);
+          float filmWash = 1.0 - smoothstep(0.06, 0.42, filmH) * 0.70;
+          float powderMask = tajinUpper * smoothstep(0.16, 0.70, tClump * 0.70 + tFine * 0.30) * meltWash * filmWash;
+
+          // Rich powdery guajillo-paprika chili dust with fine granular contrast & tiny warm salt-lime sparkle
+          vec3 chiliDust = mix(
+            vec3(0.72, 0.19, 0.018),
+            vec3(0.95, 0.40, 0.045),
+            clamp(tFine * 0.52 + tMicro * 0.48, 0.0, 1.0)
+          );
+          float dustGrain = 0.76 + 0.46 * smoothstep(0.24, 0.84, tMicro);
+          float coatAlpha = clamp(powderMask * (0.36 + 0.38 * smoothstep(0.28, 0.82, tFine * 0.5 + tMicro * 0.5)), 0.0, 0.68);
+          color = mix(color, chiliDust * dustGrain, coatAlpha);
+        }
+
         // Tag postIceRT.a so Pass 6b can apply a continuous capillary surface-tension blur & contact shadow
         // strictly where uncovered berries/strawberries physically emerge from melting ice (zero effect on
         // mid-air falling fruits or studio silhouettes!):
@@ -1409,6 +1524,9 @@ export function createPopsicleIceSystem(
     const pal = resolveOpticalPalette(nextRecipe);
     uniforms.uOpacity.value = pal.opacity;
     uniforms.uIsDual.value = pal.isDual ? 1.0 : 0.0;
+    uniforms.uKiwiA.value = pal.kiwiMaskA;
+    uniforms.uKiwiB.value = pal.kiwiMaskB;
+    uniforms.uTajinCoat.value = nextRecipe.toppings.includes('tajin') ? 1.0 : 0.0;
     uniforms.uSigmaA.value.set(...pal.sigmaA);
     uniforms.uCoreA.value.set(...pal.coreA);
     uniforms.uMidA.value.set(...pal.midA);

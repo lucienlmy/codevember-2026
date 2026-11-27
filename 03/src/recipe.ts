@@ -4,6 +4,7 @@ export type FlavorId =
   | 'mango'
   | 'lemon'
   | 'orange'
+  | 'kiwi'
   | 'watermelon'
   | 'strawberry'
   | 'raspberry'
@@ -16,6 +17,7 @@ export type ToppingId =
   | 'chocolate'
   | 'shaved-lemon'
   | 'strawberry'
+  | 'tajin'
   | 'raspberry'
   | 'kaksmulor';
 
@@ -62,6 +64,9 @@ export interface ResolvedOpticalPalette {
   opacity: number;
   /** True when two distinct tastes are active for organic layered/swirled dual-color blending */
   isDual: boolean;
+  /** 1 when Flavor A / B is Kiwi (automatically embeds volumetric black kiwi seeds inside the green zone!) */
+  kiwiMaskA: number;
+  kiwiMaskB: number;
   // Flavor A (top / primary)
   sigmaA: [number, number, number];
   coreA: [number, number, number];
@@ -89,17 +94,17 @@ export const FLAVOR_LIST: FlavorOpticalSpec[] = [
   {
     id: 'mango',
     label: 'Mango',
-    swatch: '#f5a61c',
-    sigma: [0.22, 1.52, 8.60],
-    core: [1.68, 1.18, 0.20],
-    mid: [1.46, 0.72, 0.06],
-    deep: [0.98, 0.30, 0.02],
-    waterCloudiness: 0.22,
-    creamAlbedo: [0.92, 0.46, 0.035],
-    creamSss: [1.14, 0.64, 0.09],
-    creamDeep: [0.56, 0.20, 0.010],
-    stain: [0.95, 0.60, 0.10],
-    dropSigma: [0.22, 1.20, 4.40],
+    swatch: '#f29214',
+    sigma: [0.24, 2.45, 9.60],
+    core: [1.48, 0.78, 0.09],
+    mid: [1.24, 0.44, 0.028],
+    deep: [0.82, 0.18, 0.008],
+    waterCloudiness: 0.36,
+    creamAlbedo: [0.90, 0.36, 0.025],
+    creamSss: [1.12, 0.54, 0.07],
+    creamDeep: [0.54, 0.15, 0.008],
+    stain: [0.94, 0.48, 0.06],
+    dropSigma: [0.22, 1.75, 4.90],
   },
   {
     id: 'lemon',
@@ -130,6 +135,21 @@ export const FLAVOR_LIST: FlavorOpticalSpec[] = [
     creamDeep: [0.54, 0.11, 0.014],
     stain: [0.94, 0.42, 0.09],
     dropSigma: [0.20, 2.05, 4.80],
+  },
+  {
+    id: 'kiwi',
+    label: 'Kiwi',
+    swatch: '#5d9822',
+    sigma: [4.25, 0.92, 8.20],
+    core: [0.68, 1.18, 0.22],
+    mid: [0.34, 0.80, 0.08],
+    deep: [0.12, 0.38, 0.025],
+    waterCloudiness: 0.24,
+    creamAlbedo: [0.28, 0.54, 0.085],
+    creamSss: [0.46, 0.78, 0.17],
+    creamDeep: [0.12, 0.26, 0.028],
+    stain: [0.34, 0.60, 0.12],
+    dropSigma: [2.55, 0.58, 4.70],
   },
   {
     id: 'watermelon',
@@ -232,6 +252,7 @@ export const TOPPING_LIST: Array<{ id: ToppingId; label: string; swatch: string 
   { id: 'chocolate', label: 'Chocolate', swatch: '#3d2013' },
   { id: 'shaved-lemon', label: 'Shaved lemon', swatch: '#f5d738' },
   { id: 'strawberry', label: 'Strawberry', swatch: '#d92836' },
+  { id: 'tajin', label: 'Tajín', swatch: '#c84110' },
   { id: 'raspberry', label: 'Raspberry', swatch: '#b9164d' },
   { id: 'kaksmulor', label: 'Kaksmulor', swatch: '#302420' },
 ];
@@ -258,9 +279,9 @@ export const POPSICLE_PRESETS: PopsiclePreset[] = [
   },
   {
     id: 'mango-sunrise',
-    name: 'Mango Sunrise',
+    name: 'Mango Tajín',
     seed: 4,
-    recipe: { base: 'water', flavors: ['mango', 'orange'], toppings: ['raspberry', 'shaved-lemon'] },
+    recipe: { base: 'water', flavors: ['mango'], toppings: ['tajin'] },
   },
   {
     id: 'pink-lemonade',
@@ -375,6 +396,8 @@ export function resolveOpticalPalette(rawRecipe: PopsicleRecipe): ResolvedOptica
         : FLAVOR_MAP.strawberry;
   const specB: OpticalSpec = recipe.flavors.length > 1 ? FLAVOR_MAP[recipe.flavors[1]] : specA;
   const isDual = recipe.flavors.length > 1 && recipe.flavors[0] !== recipe.flavors[1];
+  const kiwiMaskA = recipe.flavors.length > 0 && recipe.flavors[0] === 'kiwi' ? 1 : 0;
+  const kiwiMaskB = recipe.flavors.length > 1 ? (recipe.flavors[1] === 'kiwi' ? 1 : 0) : kiwiMaskA;
 
   const opacity = isCoconut
     ? 1.0
@@ -425,6 +448,8 @@ export function resolveOpticalPalette(rawRecipe: PopsicleRecipe): ResolvedOptica
     isCoconut,
     opacity,
     isDual,
+    kiwiMaskA,
+    kiwiMaskB,
     sigmaA: specA.sigma,
     coreA: specA.core,
     midA: specA.mid,
